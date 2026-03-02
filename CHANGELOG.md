@@ -5,6 +5,10 @@
 ### CLI
 - Preserve default imports when `mcporter config add` writes a config file, instead of forcing `"imports": []`.
 
+### Tooling / Dependencies
+- Updated dependencies to latest releases (including MCP SDK, Rolldown RC, Zod, Biome, Oxlint, Vitest, Bun types).
+- Synced `biome.json` schema URL to Biome `2.4.5`.
+
 ## [0.7.3] - 2025-12-29
 
 ### CLI
