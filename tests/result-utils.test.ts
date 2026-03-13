@@ -215,6 +215,77 @@ describe('createCallResult json extraction', () => {
     const result = createCallResult(response);
     expect(result.json()).toEqual({ nested: true });
   });
+
+  it('returns the full structuredContent object when data is only one field among many', () => {
+    const response = {
+      raw: {
+        structuredContent: {
+          error: {
+            type: 'USER_ERROR',
+            message: 'Base name is required and cannot be empty or only whitespace',
+            retryable: false,
+            code: 'INVALID_NAME',
+          },
+          status: 'error',
+          summary: 'Failed to create base: name is required',
+          data: {},
+          meta: {},
+          trace_id: 'trace-123',
+        },
+      },
+    };
+    const result = createCallResult(response);
+    expect(result.json()).toEqual({
+      error: {
+        type: 'USER_ERROR',
+        message: 'Base name is required and cannot be empty or only whitespace',
+        retryable: false,
+        code: 'INVALID_NAME',
+      },
+      status: 'error',
+      summary: 'Failed to create base: name is required',
+      data: {},
+      meta: {},
+      trace_id: 'trace-123',
+    });
+  });
+
+  it('returns the full parsed json object when text content includes data plus error fields', () => {
+    const response = {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              type: 'USER_ERROR',
+              message: 'Base name is required and cannot be empty or only whitespace',
+              retryable: false,
+              code: 'INVALID_NAME',
+            },
+            status: 'error',
+            summary: 'Failed to create base: name is required',
+            data: {},
+            meta: {},
+            trace_id: 'trace-123',
+          }),
+        },
+      ],
+    };
+    const result = createCallResult(response);
+    expect(result.json()).toEqual({
+      error: {
+        type: 'USER_ERROR',
+        message: 'Base name is required and cannot be empty or only whitespace',
+        retryable: false,
+        code: 'INVALID_NAME',
+      },
+      status: 'error',
+      summary: 'Failed to create base: name is required',
+      data: {},
+      meta: {},
+      trace_id: 'trace-123',
+    });
+  });
 });
 
 describe('createCallResult resource extraction', () => {

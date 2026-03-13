@@ -178,17 +178,39 @@ function collectImages(images: ImageContent[]): ImageContent[] | null {
   return images;
 }
 
+function unwrapJsonEnvelope(record: Record<string, unknown>, fallback: unknown): unknown {
+  if ('json' in record) {
+    return record.json ?? null;
+  }
+  if ('data' in record) {
+    return Object.keys(record).length === 1 ? (record.data ?? null) : fallback;
+  }
+  return null;
+}
+
+function parseStructuredContent(value: unknown): unknown {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return tryParseJson(value);
+  }
+  if (typeof value !== 'object') {
+    return null;
+  }
+
+  return unwrapJsonEnvelope(value as Record<string, unknown>, value);
+}
+
 // tryParseJson pulls JSON payloads out of structured responses or raw strings.
 function tryParseJson(value: unknown): unknown {
   if (value === undefined || value === null) {
     return null;
   }
   if (typeof value === 'object') {
-    if ('json' in (value as Record<string, unknown>)) {
-      return (value as Record<string, unknown>).json ?? null;
-    }
-    if ('data' in (value as Record<string, unknown>)) {
-      return (value as Record<string, unknown>).data ?? null;
+    const unwrapped = unwrapJsonEnvelope(value as Record<string, unknown>, value);
+    if (unwrapped !== null) {
+      return unwrapped;
     }
   }
   if (typeof value === 'string') {
@@ -242,7 +264,7 @@ export function createCallResult<T = unknown>(raw: T): CallResult<T> {
     },
     json<J = unknown>() {
       const collected = getCollectedContent();
-      const parsedStructured = tryParseJson(collected.structuredContent);
+      const parsedStructured = parseStructuredContent(collected.structuredContent);
       if (parsedStructured !== null) {
         return parsedStructured as J;
       }

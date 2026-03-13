@@ -19,6 +19,32 @@ describe('printCallOutput format selection', () => {
       },
     ],
     [
+      'auto prints the full structuredContent object instead of only its data field',
+      'auto',
+      {
+        structuredContent: {
+          status: 'error',
+          summary: 'Failed to create base: name is required',
+          data: {},
+          meta: {},
+        },
+        content: [
+          {
+            type: 'text',
+            text: '{"status":"error","summary":"Failed to create base: name is required","data":{},"meta":{}}',
+          },
+        ],
+      },
+      (logged: unknown) => {
+        expect(JSON.parse(String(logged))).toEqual({
+          status: 'error',
+          summary: 'Failed to create base: name is required',
+          data: {},
+          meta: {},
+        });
+      },
+    ],
+    [
       'text prefers text over markdown/json',
       'text',
       {
