@@ -12,7 +12,13 @@ import { readCachedAccessToken } from '../oauth-persistence.js';
 import { materializeHeaders } from '../runtime-header-utils.js';
 import { isUnauthorizedError, maybeEnableOAuth } from '../runtime-oauth-support.js';
 import { closeTransportAndWait } from '../runtime-process-utils.js';
-import { connectWithAuth, isOAuthFlowError, isPostAuthConnectError, OAuthTimeoutError } from './oauth.js';
+import {
+  connectWithAuth,
+  isOAuthFlowError,
+  isPostAuthConnectError,
+  type OAuthCapableTransport,
+  OAuthTimeoutError,
+} from './oauth.js';
 import { resolveCommandArgument, resolveCommandArguments } from './utils.js';
 
 const STDIO_TRACE_ENABLED = process.env.MCPORTER_STDIO_TRACE === '1';
@@ -48,6 +54,11 @@ function isLegacySseTransportMismatch(error: unknown): boolean {
   return issue.kind === 'http' && (issue.statusCode === 404 || issue.statusCode === 405);
 }
 
+interface ResolvedHttpTransportOptions {
+  requestInit?: RequestInit;
+  authProvider?: OAuthSession['provider'];
+}
+
 function attachStdioTraceLogging(_transport: StdioClientTransport, _label?: string): void {
   // STDIO instrumentation is handled via sdk-patches side effects. This helper remains
   // so runtime callers can opt-in without sprinkling conditional checks everywhere.
@@ -65,6 +76,72 @@ export interface CreateClientContextOptions {
   readonly oauthTimeoutMs?: number;
   readonly onDefinitionPromoted?: (definition: ServerDefinition) => void;
   readonly allowCachedAuth?: boolean;
+}
+
+function removeAuthorizationHeader(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!headers) {
+    return undefined;
+  }
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'authorization') {
+      delete headers[key];
+    }
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+function createHttpTransportOptions(
+  definition: ServerDefinition,
+  oauthSession: OAuthSession | undefined,
+  shouldEstablishOAuth: boolean
+): ResolvedHttpTransportOptions {
+  const command = definition.command;
+  if (command.kind !== 'http') {
+    throw new Error(`Server '${definition.name}' is not configured for HTTP transport.`);
+  }
+  const resolvedHeaders = materializeHeaders(command.headers, definition.name);
+  const effectiveHeaders = shouldEstablishOAuth ? removeAuthorizationHeader(resolvedHeaders) : resolvedHeaders;
+  return {
+    requestInit: effectiveHeaders ? { headers: effectiveHeaders as HeadersInit } : undefined,
+    authProvider: oauthSession?.provider,
+  };
+}
+
+async function closeOAuthSession(oauthSession?: OAuthSession): Promise<void> {
+  await oauthSession?.close().catch(() => {});
+}
+
+function shouldAbortSseFallback(error: unknown): boolean {
+  if (isPostAuthConnectError(error)) {
+    return !isLegacySseTransportMismatch(error);
+  }
+  return isOAuthFlowError(error) || error instanceof OAuthTimeoutError;
+}
+
+function maybePromoteHttpDefinition(
+  definition: ServerDefinition,
+  logger: Logger,
+  options: CreateClientContextOptions
+): ServerDefinition | undefined {
+  if (options.maxOAuthAttempts === 0) {
+    return undefined;
+  }
+  return maybeEnableOAuth(definition, logger);
+}
+
+async function connectHttpTransport<TTransport extends OAuthCapableTransport>(
+  client: Client,
+  transport: TTransport,
+  oauthSession: OAuthSession | undefined,
+  logger: Logger,
+  connectOptions: Parameters<typeof connectWithAuth>[4]
+): Promise<TTransport> {
+  try {
+    return (await connectWithAuth(client, transport, oauthSession, logger, connectOptions)) as TTransport;
+  } catch (error) {
+    await closeTransportAndWait(logger, transport).catch(() => {});
+    throw error;
+  }
 }
 
 export async function createClientContext(
@@ -146,91 +223,66 @@ export async function createClientContext(
       if (shouldEstablishOAuth) {
         oauthSession = await createOAuthSession(activeDefinition, logger);
       }
+      const transportOptions = createHttpTransportOptions(activeDefinition, oauthSession, shouldEstablishOAuth);
 
-      const resolvedHeaders = materializeHeaders(command.headers, activeDefinition.name);
-      if (shouldEstablishOAuth && resolvedHeaders) {
-        for (const key of Object.keys(resolvedHeaders)) {
-          if (key.toLowerCase() === 'authorization') {
-            delete resolvedHeaders[key];
-          }
-        }
-      }
-      const requestInit: RequestInit | undefined =
-        resolvedHeaders && Object.keys(resolvedHeaders).length > 0
-          ? { headers: resolvedHeaders as HeadersInit }
-          : undefined;
-      const baseOptions = {
-        requestInit,
-        authProvider: oauthSession?.provider,
-      };
-
-      const attemptConnect = async () => {
-        const createStreamableTransport = () => new StreamableHTTPClientTransport(command.url, baseOptions);
-        let streamableTransport = createStreamableTransport();
-        try {
-          streamableTransport = (await connectWithAuth(client, streamableTransport, oauthSession, logger, {
+      try {
+        const createStreamableTransport = () => new StreamableHTTPClientTransport(command.url, transportOptions);
+        const streamableTransport = await connectHttpTransport(
+          client,
+          createStreamableTransport(),
+          oauthSession,
+          logger,
+          {
             serverName: activeDefinition.name,
             maxAttempts: options.maxOAuthAttempts,
             oauthTimeoutMs: options.oauthTimeoutMs,
             recreateTransport: async () => createStreamableTransport(),
-          })) as StreamableHTTPClientTransport;
-          return {
-            client,
-            transport: streamableTransport,
-            definition: activeDefinition,
-            oauthSession,
-          } as ClientContext;
-        } catch (error) {
-          await closeTransportAndWait(logger, streamableTransport).catch(() => {});
-          throw error;
-        }
-      };
-
-      try {
-        return await attemptConnect();
-      } catch (primaryError) {
-        if (isPostAuthConnectError(primaryError)) {
-          if (!isLegacySseTransportMismatch(primaryError)) {
-            await oauthSession?.close().catch(() => {});
-            throw primaryError;
           }
-        } else if (isOAuthFlowError(primaryError) || primaryError instanceof OAuthTimeoutError) {
-          await oauthSession?.close().catch(() => {});
+        );
+        return {
+          client,
+          transport: streamableTransport,
+          definition: activeDefinition,
+          oauthSession,
+        };
+      } catch (primaryError) {
+        if (shouldAbortSseFallback(primaryError)) {
+          await closeOAuthSession(oauthSession);
           throw primaryError;
         }
         if (isUnauthorizedError(primaryError)) {
-          await oauthSession?.close().catch(() => {});
+          await closeOAuthSession(oauthSession);
           oauthSession = undefined;
-          if (options.maxOAuthAttempts !== 0) {
-            const promoted = maybeEnableOAuth(activeDefinition, logger);
-            if (promoted) {
-              activeDefinition = promoted;
-              options.onDefinitionPromoted?.(promoted);
-              continue;
-            }
+          const promoted = maybePromoteHttpDefinition(activeDefinition, logger, options);
+          if (promoted) {
+            activeDefinition = promoted;
+            options.onDefinitionPromoted?.(promoted);
+            continue;
           }
         }
         if (primaryError instanceof Error) {
           logger.info(`Falling back to SSE transport for '${activeDefinition.name}': ${primaryError.message}`);
         }
-        const sseTransport = new SSEClientTransport(command.url, {
-          ...baseOptions,
-        });
         try {
-          const connectedTransport = (await connectWithAuth(client, sseTransport, oauthSession, logger, {
-            serverName: activeDefinition.name,
-            maxAttempts: options.maxOAuthAttempts,
-            oauthTimeoutMs: options.oauthTimeoutMs,
-          })) as SSEClientTransport;
+          const connectedTransport = await connectHttpTransport(
+            client,
+            new SSEClientTransport(command.url, transportOptions),
+            oauthSession,
+            logger,
+            {
+              serverName: activeDefinition.name,
+              maxAttempts: options.maxOAuthAttempts,
+              oauthTimeoutMs: options.oauthTimeoutMs,
+            }
+          );
           return { client, transport: connectedTransport, definition: activeDefinition, oauthSession };
         } catch (sseError) {
-          await closeTransportAndWait(logger, sseTransport).catch(() => {});
-          await oauthSession?.close().catch(() => {});
+          await closeOAuthSession(oauthSession);
           if (sseError instanceof OAuthTimeoutError) {
             throw sseError;
           }
-          if (isUnauthorizedError(sseError) && options.maxOAuthAttempts !== 0) {
-            const promoted = maybeEnableOAuth(activeDefinition, logger);
+          if (isUnauthorizedError(sseError)) {
+            const promoted = maybePromoteHttpDefinition(activeDefinition, logger, options);
             if (promoted) {
               activeDefinition = promoted;
               options.onDefinitionPromoted?.(promoted);

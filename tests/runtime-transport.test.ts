@@ -1,4 +1,6 @@
-import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -63,12 +65,26 @@ function stubHttpDefinition(url: string): ServerDefinition {
   };
 }
 
+function stubOAuthHttpDefinition(url: string): ServerDefinition {
+  return {
+    ...stubHttpDefinition(url),
+    auth: 'oauth',
+  };
+}
+
+function createPromotionRecorder() {
+  const promotedDefinitions: ServerDefinition[] = [];
+  return {
+    promotedDefinitions,
+    onDefinitionPromoted: (promoted: ServerDefinition) => {
+      promotedDefinitions.push(promoted);
+    },
+  };
+}
+
 describe('createClientContext (HTTP)', () => {
   it('falls back to SSE when primary connect fails', async () => {
     const definition = stubHttpDefinition('https://example.com/mcp');
-    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
     const clientConnect = vi
       .spyOn(Client.prototype, 'connect')
@@ -87,12 +103,7 @@ describe('createClientContext (HTTP)', () => {
   });
 
   it('does not fall back to SSE after the OAuth flow fails', async () => {
-    const definition: ServerDefinition = {
-      ...stubHttpDefinition('https://example.com/secure'),
-      auth: 'oauth',
-    };
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const definition = stubOAuthHttpDefinition('https://example.com/secure');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -115,12 +126,7 @@ describe('createClientContext (HTTP)', () => {
   });
 
   it('still falls back to SSE after auth when Streamable HTTP reveals a 405 transport mismatch', async () => {
-    const definition: ServerDefinition = {
-      ...stubHttpDefinition('https://example.com/legacy-sse'),
-      auth: 'oauth',
-    };
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const definition = stubOAuthHttpDefinition('https://example.com/legacy-sse');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -139,12 +145,7 @@ describe('createClientContext (HTTP)', () => {
   });
 
   it('surfaces provider 405 errors after auth instead of falling back to SSE', async () => {
-    const definition: ServerDefinition = {
-      ...stubHttpDefinition('https://example.com/provider-405'),
-      auth: 'oauth',
-    };
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const definition = stubOAuthHttpDefinition('https://example.com/provider-405');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -166,12 +167,7 @@ describe('createClientContext (HTTP)', () => {
   });
 
   it('still falls back to SSE after auth for generic 405 transport errors', async () => {
-    const definition: ServerDefinition = {
-      ...stubHttpDefinition('https://example.com/legacy-sse-proxy'),
-      auth: 'oauth',
-    };
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const definition = stubOAuthHttpDefinition('https://example.com/legacy-sse-proxy');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -192,12 +188,7 @@ describe('createClientContext (HTTP)', () => {
   });
 
   it('still falls back to SSE for oauth servers when no Streamable auth challenge was observed', async () => {
-    const definition: ServerDefinition = {
-      ...stubHttpDefinition('https://example.com/sse-only'),
-      auth: 'oauth',
-    };
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const definition = stubOAuthHttpDefinition('https://example.com/sse-only');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -217,7 +208,6 @@ describe('createClientContext (HTTP)', () => {
 
   it('promotes ad-hoc HTTP servers after generic 401 errors from Streamable HTTP', async () => {
     const definition = stubHttpDefinition('https://example.com/secure');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -230,12 +220,10 @@ describe('createClientContext (HTTP)', () => {
         return transport;
       });
 
-    const promotedDefinitions: ServerDefinition[] = [];
+    const { promotedDefinitions, onDefinitionPromoted } = createPromotionRecorder();
     const context = await createClientContext(definition, logger, clientInfo, {
       maxOAuthAttempts: 1,
-      onDefinitionPromoted: (promoted) => {
-        promotedDefinitions.push(promoted);
-      },
+      onDefinitionPromoted,
     });
 
     expect(context.definition.auth).toBe('oauth');
@@ -246,8 +234,6 @@ describe('createClientContext (HTTP)', () => {
 
   it('promotes ad-hoc HTTP servers after generic 401 errors from the SSE fallback path', async () => {
     const definition = stubHttpDefinition('https://example.com/sse-auth');
-    const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
     mocks.connectWithAuth
       .mockImplementationOnce(async (_client, transport) => {
@@ -264,12 +250,10 @@ describe('createClientContext (HTTP)', () => {
         return transport;
       });
 
-    const promotedDefinitions: ServerDefinition[] = [];
+    const { promotedDefinitions, onDefinitionPromoted } = createPromotionRecorder();
     const context = await createClientContext(definition, logger, clientInfo, {
       maxOAuthAttempts: 1,
-      onDefinitionPromoted: (promoted) => {
-        promotedDefinitions.push(promoted);
-      },
+      onDefinitionPromoted,
     });
 
     expect(context.definition.auth).toBe('oauth');
@@ -291,8 +275,6 @@ describe('createClientContext (HTTP)', () => {
         },
       },
     };
-    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
     const createOAuthSessionSpy = vi.spyOn(oauthModule, 'createOAuthSession').mockResolvedValue({
       provider: {} as never,
       waitForAuthorizationCode: vi.fn(),

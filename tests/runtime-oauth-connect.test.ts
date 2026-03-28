@@ -22,6 +22,45 @@ class MockTransport implements Transport {
   }
 }
 
+function createLogger(): Logger {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+}
+
+function createPendingAuthorizationSession() {
+  const pendingResolvers: Array<(code: string) => void> = [];
+  const waitForAuthorizationCode = vi.fn(
+    () =>
+      new Promise<string>((resolve) => {
+        pendingResolvers.push(resolve);
+      })
+  );
+  const session: OAuthSession = {
+    provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
+    waitForAuthorizationCode,
+    close: vi.fn(async () => {}),
+  };
+  return {
+    session,
+    waitForAuthorizationCode,
+    pendingResolvers,
+    resolveNextCode: (code: string) => {
+      const resolve = pendingResolvers.shift();
+      if (!resolve) {
+        throw new Error(`Missing pending authorization resolver for '${code}'.`);
+      }
+      resolve(code);
+    },
+  };
+}
+
+async function flushAuthLoop(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('connectWithAuth', () => {
   it('waits for authorization code and retries connection', async () => {
     const connect = vi
@@ -30,26 +69,10 @@ describe('connectWithAuth', () => {
       .mockResolvedValueOnce(undefined);
     const client = { connect } as unknown as Client;
 
-    let resolveCode: (code: string) => void = () => {};
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveCode = resolve;
-        })
-    );
-    const close = vi.fn(async () => {});
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close,
-    };
+    const { session, waitForAuthorizationCode, resolveNextCode } = createPendingAuthorizationSession();
 
     const transport = new MockTransport();
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -57,8 +80,8 @@ describe('connectWithAuth', () => {
       oauthTimeoutMs: 5000,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    resolveCode('oauth-code-123');
+    await flushAuthLoop();
+    resolveNextCode('oauth-code-123');
 
     const connectedTransport = await promise;
 
@@ -75,25 +98,10 @@ describe('connectWithAuth', () => {
       .mockResolvedValueOnce(undefined);
     const client = { connect } as unknown as Client;
 
-    let resolveCode: (code: string) => void = () => {};
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveCode = resolve;
-        })
-    );
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close: vi.fn(async () => {}),
-    };
+    const { session, waitForAuthorizationCode, resolveNextCode } = createPendingAuthorizationSession();
 
     const transport = new MockTransport();
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -101,8 +109,8 @@ describe('connectWithAuth', () => {
       oauthTimeoutMs: 5000,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    resolveCode('oauth-code-123');
+    await flushAuthLoop();
+    resolveNextCode('oauth-code-123');
 
     const connectedTransport = await promise;
 
@@ -119,28 +127,12 @@ describe('connectWithAuth', () => {
       .mockResolvedValueOnce(undefined);
     const client = { connect } as unknown as Client;
 
-    let resolveCode: (code: string) => void = () => {};
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveCode = resolve;
-        })
-    );
-    const close = vi.fn(async () => {});
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close,
-    };
+    const { session, resolveNextCode } = createPendingAuthorizationSession();
 
     const transport = new MockTransport();
     const replacement = new MockTransport();
     const recreateTransport = vi.fn(async () => replacement);
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -149,8 +141,8 @@ describe('connectWithAuth', () => {
       recreateTransport,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    resolveCode('oauth-code-123');
+    await flushAuthLoop();
+    resolveNextCode('oauth-code-123');
 
     const connectedTransport = await promise;
 
@@ -169,25 +161,10 @@ describe('connectWithAuth', () => {
       .mockRejectedValueOnce(reconnectError);
     const client = { connect } as unknown as Client;
 
-    let resolveCode: (code: string) => void = () => {};
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveCode = resolve;
-        })
-    );
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close: vi.fn(async () => {}),
-    };
+    const { session, resolveNextCode } = createPendingAuthorizationSession();
 
     const transport = new MockTransport();
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -195,8 +172,8 @@ describe('connectWithAuth', () => {
       oauthTimeoutMs: 5000,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    resolveCode('oauth-code-123');
+    await flushAuthLoop();
+    resolveNextCode('oauth-code-123');
 
     await expect(promise).rejects.toSatisfy(
       (error: unknown) => error === reconnectError && isPostAuthConnectError(error)
@@ -211,25 +188,11 @@ describe('connectWithAuth', () => {
       .mockResolvedValueOnce(undefined);
     const client = { connect } as unknown as Client;
 
-    const pendingResolvers: Array<(code: string) => void> = [];
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          pendingResolvers.push(resolve);
-        })
-    );
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close: vi.fn(async () => {}),
-    };
+    const { session, waitForAuthorizationCode, pendingResolvers, resolveNextCode } =
+      createPendingAuthorizationSession();
 
     const transport = new MockTransport();
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -237,13 +200,13 @@ describe('connectWithAuth', () => {
       oauthTimeoutMs: 5000,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
+    await flushAuthLoop();
     expect(pendingResolvers).toHaveLength(1);
-    pendingResolvers.shift()?.('oauth-code-1');
+    resolveNextCode('oauth-code-1');
 
-    await new Promise((resolve) => setImmediate(resolve));
+    await flushAuthLoop();
     expect(pendingResolvers).toHaveLength(1);
-    pendingResolvers.shift()?.('oauth-code-2');
+    resolveNextCode('oauth-code-2');
 
     const connectedTransport = await promise;
 
@@ -257,28 +220,13 @@ describe('connectWithAuth', () => {
     const connect = vi.fn().mockRejectedValueOnce(new UnauthorizedError('auth needed'));
     const client = { connect } as unknown as Client;
 
-    let resolveCode: (code: string) => void = () => {};
-    const waitForAuthorizationCode = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveCode = resolve;
-        })
-    );
-    const session: OAuthSession = {
-      provider: { waitForAuthorizationCode } as unknown as OAuthSession['provider'],
-      waitForAuthorizationCode,
-      close: vi.fn(async () => {}),
-    };
+    const { session, resolveNextCode } = createPendingAuthorizationSession();
 
     const finishAuthError = new Error('token endpoint returned 405');
     const transport = new MockTransport(async () => {
       throw finishAuthError;
     });
-    const logger: Logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    };
+    const logger = createLogger();
 
     const promise = connectWithAuth(client, transport, session, logger, {
       serverName: 'test-server',
@@ -286,8 +234,8 @@ describe('connectWithAuth', () => {
       oauthTimeoutMs: 5000,
     });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    resolveCode('oauth-code-123');
+    await flushAuthLoop();
+    resolveNextCode('oauth-code-123');
 
     await expect(promise).rejects.toSatisfy((error: unknown) => error === finishAuthError && isOAuthFlowError(error));
   });
