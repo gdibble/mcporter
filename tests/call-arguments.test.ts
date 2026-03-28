@@ -40,6 +40,21 @@ describe('parseCallArguments', () => {
     expect(parsed.args.orderBy).toBe('updatedAt');
   });
 
+  it.each([
+    ['--source', '--source'],
+    ['--source=import', '--source=import'],
+  ] as const)('throws on unknown long flags like %s', (flag, expectedToken) => {
+    expect(() => parseCallArguments(['server.tool', flag])).toThrow(
+      new RegExp(`Unknown flag '${expectedToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`)
+    );
+  });
+
+  it('treats values after -- as literal positional arguments', () => {
+    const parsed = parseCallArguments(['server.tool', '--', '--source', 'import', '--raw=true']);
+    expect(parsed.selector).toBe('server.tool');
+    expect(parsed.positionalArgs).toEqual(['--source', 'import', '--raw=true']);
+  });
+
   it('throws when flags conflict with call expression content', () => {
     expect(() => parseCallArguments(['--server', 'linear', 'cursor.list_documents(limit:1)'])).toThrow(
       /Conflicting server names/

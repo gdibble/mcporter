@@ -31,6 +31,7 @@ mcporter call context7.resolve-library-id libraryName: value
 - Use `--flag value` when you prefer long-form CLI syntax.
 - Mixed forms are fine: `mcporter call linear.create_issue --team ENG title=value due: tomorrow`.
 - `--args '{"title":"Bug"}'` still ingests JSON payloads directly.
+- Unknown long flags now error instead of silently becoming tool arguments; use `title=value`, `--args`, or `--` before literal positional values beginning with `--`.
 
 ## 3. Function-Call Syntax
 

@@ -328,6 +328,7 @@
 - Expanded the ad-hoc/OAuth story across `README.md`, `docs/adhoc.md`, `docs/local.md`, `docs/known-issues.md`, and `docs/supabase-auth-issue.md`, detailing when servers auto-promote to OAuth, how retries behave, and how to persist generated definitions safely.
 - Updated the README, CLI reference, and generator docs to cover the new `--all-parameters` flag, list formatter, metadata embedding, the `mcporter emit-ts` workflow, and refreshed branding so the CLI and docs consistently introduce the project as **MCPorter**.
 - Tightened `docs/RELEASE.md` with a zero-warning policy so `pnpm check`, `pnpm test`, `npm pack --dry-run`, and friends must run clean before publishing.
+- `mcporter call` now rejects unknown long flags like `--source` instead of silently treating them as positional tool arguments; use `key=value`, `--args`, or `--` for literal `--value` positionals (PR #35, thanks @beverm2391).
 
 ## [0.2.0] - 2025-11-06
 

@@ -174,6 +174,7 @@ export function printCallHelp(): void {
     '  function-call syntax   \'server.tool(arg: "value", other: 1)\'.',
     '  --args <json>          Provide a JSON object payload.',
     '  positional values      Accepted when schema order is known.',
+    '  --                     Treat remaining tokens as literal positional values.',
     '',
     'Runtime flags:',
     '  --timeout <ms>         Override the call timeout.',

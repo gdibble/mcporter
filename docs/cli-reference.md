@@ -26,6 +26,7 @@ A quick reference for the primary `mcporter` subcommands. Each command inherits
   pseudo-TS syntax and `--arg` flags.
 - Useful flags:
   - `--server`, `--tool` – alternate way to target a tool.
+  - `--` – stop flag parsing so remaining tokens stay literal positional values.
   - `--timeout <ms>` – override call timeout (defaults to `CALL_TIMEOUT_MS`).
   - `--output text|markdown|json|raw` – choose how to render the `CallResult`.
   - `--save-images <dir>` – persist image content blocks to files under the specified directory.

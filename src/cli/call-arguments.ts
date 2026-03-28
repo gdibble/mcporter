@@ -7,6 +7,7 @@ import {
   shouldPromoteSelectorToCommand,
 } from './call-argument-values.js';
 import { extractEphemeralServerFlags } from './ephemeral-flags.js';
+import { CliUsageError } from './errors.js';
 import { consumeOutputFormat } from './output-format.js';
 import type { OutputFormat } from './output-utils.js';
 import { consumeTimeoutFlag } from './timeouts.js';
@@ -60,6 +61,7 @@ export function parseCallArguments(args: string[]): CallArgsParseResult {
     defaultFormat: 'auto',
   });
   const positional: string[] = [];
+  const literalPositional: string[] = [];
   let index = 0;
   while (index < args.length) {
     const token = args[index];
@@ -67,10 +69,24 @@ export function parseCallArguments(args: string[]): CallArgsParseResult {
       index += 1;
       continue;
     }
+    if (token === '--') {
+      literalPositional.push(...args.slice(index + 1).filter(Boolean));
+      break;
+    }
     const flagHandler = FLAG_HANDLERS[token];
     if (flagHandler) {
       index = flagHandler({ args, index, result, state: flagState });
       continue;
+    }
+    if (token.startsWith('--')) {
+      throw new CliUsageError(
+        [
+          `Unknown flag '${token}' passed to call command.`,
+          `If you intended to pass a tool argument, use '${token.slice(2)}=<value>' or --args '{"${token.slice(2)}": ...}'.`,
+          "If you intended to pass a literal positional value, insert '--' before it.",
+          "Run 'mcporter call --help' to see available flags.",
+        ].join('\n')
+      );
     }
     positional.push(token);
     index += 1;
@@ -167,6 +183,12 @@ export function parseCallArguments(args: string[]): CallArgsParseResult {
   }
   if (trailingPositional.length > 0) {
     result.positionalArgs = [...(result.positionalArgs ?? []), ...trailingPositional];
+  }
+  if (literalPositional.length > 0) {
+    result.positionalArgs = [
+      ...(result.positionalArgs ?? []),
+      ...literalPositional.map((token) => coerceValue(token, flagState.coercionMode)),
+    ];
   }
   return result;
 }
