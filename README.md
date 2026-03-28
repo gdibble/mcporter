@@ -34,6 +34,9 @@ npx mcporter call linear.create_comment issueId:ENG-123 body:'Looks good!'
 
 # Function-call style (matches signatures from `mcporter list`)
 npx mcporter call 'linear.create_comment(issueId: "ENG-123", body: "Looks good!")'
+
+# Literal positional values that start with `--`
+npx mcporter call server.tool -- --raw-value
 ```
 
 
@@ -149,6 +152,7 @@ Helpful flags:
 - `--save-images <dir>` (on `mcporter call`) -- save MCP image content blocks to files in the given directory (opt-in; stdout output shape stays unchanged).
 - `--raw-strings` (on `mcporter call`) -- keep numeric-looking argument values (for `key=value`, `key:value`, and trailing positional values) as strings.
 - `--no-coerce` (on `mcporter call`) -- keep all `key=value` and positional values as raw strings (disables bool/null/number/JSON coercion).
+- `--` (on `mcporter call`) -- stop flag parsing so the remaining tokens stay literal positional values, even when they start with `--`.
 - `--json` (on `mcporter list`) -- emit JSON summaries/counts instead of text. Multi-server runs report per-server statuses, counts, and connection issues; single-server runs include the full tool metadata.
 - `--output json/raw` (on `mcporter call`) -- when a connection fails, MCPorter prints the usual colorized hint and also emits a structured `{ server, tool, issue }` envelope so scripts can handle auth/offline/http errors programmatically.
 - `--json` (on `mcporter auth`) -- emit the same structured connection envelope whenever OAuth/transport setup fails, instead of throwing an error.
@@ -189,6 +193,7 @@ npx mcporter call --stdio "bun run ./local-server.ts" --name local-tools
 
 - **Function-call syntax.** Instead of juggling `--flag value`, you can call tools as `mcporter call 'linear.create_issue(title: "Bug", team: "ENG")'`. The parser supports nested objects/arrays, lets you omit labels when you want to rely on schema order (e.g. `mcporter 'context7.resolve-library-id("react")'`), and surfaces schema validation errors clearly. Deep dive in [docs/call-syntax.md](docs/call-syntax.md).
 - **Flag shorthand still works.** Prefer CLI-style arguments? Stick with `mcporter linear.create_issue title=value team=value`, `title=value`, `title:value`, or even `title: value`—the CLI now normalizes all three forms.
+- **Unknown long flags fail fast.** `mcporter call server.tool --source import` now errors instead of silently turning `--source` into a positional tool argument. Use `source=import`, `--args '{"source":"import"}'`, or insert `--` before literal positional values that begin with `--`.
 - **Cheatsheet.** See [docs/tool-calling.md](docs/tool-calling.md) for a quick comparison of every supported call style (auto-inferred verbs, flags, function-calls, and ad-hoc URLs).
 - **Auto-correct.** If you typo a tool name, MCPorter inspects the server’s tool catalog, retries when the edit distance is tiny, and otherwise prints a `Did you mean …?` hint. The heuristic (and how to tune it) is captured in [docs/call-heuristic.md](docs/call-heuristic.md).
 - **Richer single-server output.** `mcporter list <server>` now prints TypeScript-style signatures, inline comments, return-shape hints, and command examples that mirror the new call syntax. Optional parameters stay hidden by default—add `--all-parameters` or `--schema` whenever you need the full JSON schema.
