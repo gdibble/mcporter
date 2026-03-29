@@ -25,6 +25,11 @@
   "bin": {
     "mcporter": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "mcporter": "tsx src/cli.ts",
     "mcp": "pnpm exec tsx src/cli.ts",

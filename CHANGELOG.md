@@ -12,6 +12,9 @@
 ### Tests
 - Added regression coverage for the Bun compile wrapper so future release builds keep the embedded runtime version intact.
 
+### Tooling / Dependencies
+- npm publishes now use an explicit package allowlist, so local release tarballs/checksum files do not get bundled into the published package.
+
 ## [0.8.0] - 2026-03-29
 
 ### CLI
