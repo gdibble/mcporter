@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
   bundleOutput,
@@ -10,8 +11,10 @@ import { ensureInvocationDefaults, fetchTools, resolveServerDefinition } from '.
 import { resolveRuntimeKind } from './cli/generate/runtime.js';
 import { readPackageMetadata, writeTemplate } from './cli/generate/template.js';
 import type { ToolMetadata } from './cli/generate/tools.js';
-import { buildToolMetadata, toolsTestHelpers } from './cli/generate/tools.js';
+import { buildToolMetadataList, toolsTestHelpers } from './cli/generate/tools.js';
 import { type CliArtifactMetadata, serializeDefinition } from './cli-metadata.js';
+import { stableJsonStringify } from './cli/generate/stable-json.js';
+import type { ServerDefinition } from './config.js';
 import type { ServerToolInfo } from './runtime.js';
 
 export interface GenerateCliOptions {
@@ -28,6 +31,8 @@ export interface GenerateCliOptions {
   readonly includeTools?: string[];
   readonly excludeTools?: string[];
 }
+
+const REPRODUCIBLE_GENERATED_AT = '1970-01-01T00:00:00.000Z';
 
 // generateCli produces a standalone CLI (and optional bundle/binary) for a given MCP server.
 export async function generateCli(
@@ -55,7 +60,9 @@ export async function generateCli(
     baseDefinition.description || !derivedDescription
       ? baseDefinition
       : { ...baseDefinition, description: derivedDescription };
-  const toolMetadata: ToolMetadata[] = tools.map((tool) => buildToolMetadata(tool));
+  const embeddedDefinition = stripBuildSources(definition);
+  const serializedDefinition = serializeDefinition(embeddedDefinition);
+  const toolMetadata: ToolMetadata[] = buildToolMetadataList(tools);
   const generator = await readPackageMetadata();
   const baseInvocation = ensureInvocationDefaults(
     {
@@ -72,38 +79,54 @@ export async function generateCli(
       includeTools: options.includeTools,
       excludeTools: options.excludeTools,
     },
-    definition
+    embeddedDefinition
   );
   const embeddedMetadata: CliArtifactMetadata = {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt: REPRODUCIBLE_GENERATED_AT,
     generator,
     server: {
       name,
-      source: definition.source,
-      definition: serializeDefinition(definition),
+      definition: serializedDefinition,
     },
     artifact: {
       path: '',
       kind: 'template',
     },
-    invocation: baseInvocation,
+    invocation: buildEmbeddedInvocation(baseInvocation, serializedDefinition),
   };
 
+  const shouldBundle = Boolean(options.bundle ?? options.compile);
   let templateTmpDir: string | undefined;
   let templateOutputPath = options.outputPath;
-  if (!templateOutputPath && options.compile) {
-    const tmpPrefix = path.join(process.cwd(), 'tmp', 'mcporter-cli-');
-    await fs.mkdir(path.dirname(tmpPrefix), { recursive: true });
-    templateTmpDir = await fs.mkdtemp(tmpPrefix);
-    templateOutputPath = path.join(templateTmpDir, `${name}.ts`);
+  if (!templateOutputPath && shouldBundle) {
+    templateTmpDir = resolveImplicitTemplateDir(name, serializedDefinition);
+    await fs.mkdir(templateTmpDir, { recursive: true });
+    templateOutputPath = path.join(templateTmpDir, `${sanitizePathSegment(name) || 'server'}.ts`);
   }
+  const templateSourcePath = path.resolve(templateOutputPath ?? path.resolve(process.cwd(), `${name}.ts`));
+  let resolvedBundleTarget: string | undefined;
+  let resolvedCompileTarget: string | undefined;
+  if (shouldBundle) {
+    resolvedBundleTarget = path.resolve(
+      resolveBundleTarget({
+        bundle: options.bundle,
+        compile: options.compile,
+        outputPath: templateSourcePath,
+      })
+    );
+    if (options.compile) {
+      resolvedCompileTarget = path.resolve(computeCompileTarget(options.compile, resolvedBundleTarget, name));
+    }
+  }
+  const runtimeScriptPath = resolvedCompileTarget ?? resolvedBundleTarget ?? templateSourcePath;
 
   const outputPath = await writeTemplate({
     outputPath: templateOutputPath,
+    runtimeScriptPath,
     runtimeKind,
     timeoutMs,
-    definition,
+    definition: embeddedDefinition,
     serverName: name,
     tools: toolMetadata,
     generator,
@@ -114,17 +137,11 @@ export async function generateCli(
   let compilePath: string | undefined;
 
   try {
-    const shouldBundle = Boolean(options.bundle ?? options.compile);
-    if (shouldBundle) {
-      const targetPath = resolveBundleTarget({
-        bundle: options.bundle,
-        compile: options.compile,
-        outputPath,
-      });
+    if (shouldBundle && resolvedBundleTarget) {
       bundlePath = await bundleOutput({
         sourcePath: outputPath,
         runtimeKind,
-        targetPath,
+        targetPath: resolvedBundleTarget,
         minify: options.minify ?? false,
         bundler: bundlerKind,
       });
@@ -133,7 +150,7 @@ export async function generateCli(
         if (runtimeKind !== 'bun') {
           throw new Error('--compile is only supported when --runtime bun');
         }
-        const compileTarget = computeCompileTarget(options.compile, bundlePath, name);
+        const compileTarget = resolvedCompileTarget ?? computeCompileTarget(options.compile, bundlePath, name);
         await compileBundleWithBun(bundlePath, compileTarget);
         compilePath = compileTarget;
         if (!options.bundle) {
@@ -144,11 +161,47 @@ export async function generateCli(
     }
   } finally {
     if (templateTmpDir) {
-      await fs.rm(templateTmpDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(outputPath, { force: true }).catch(() => {});
+      await fs.rmdir(templateTmpDir).catch(() => {});
+      await fs.rmdir(path.dirname(templateTmpDir)).catch(() => {});
     }
   }
 
   return { outputPath: options.outputPath ?? outputPath, bundlePath, compilePath };
+}
+
+function stripBuildSources(definition: ServerDefinition): ServerDefinition {
+  const { source: _source, sources: _sources, ...runtimeDefinition } = definition;
+  return runtimeDefinition;
+}
+
+function buildEmbeddedInvocation(
+  invocation: CliArtifactMetadata['invocation'],
+  definition: ReturnType<typeof serializeDefinition>
+): CliArtifactMetadata['invocation'] {
+  return {
+    serverRef: stableJsonStringify(definition),
+    runtime: invocation.runtime,
+    bundler: invocation.bundler,
+    timeoutMs: invocation.timeoutMs,
+    minify: invocation.minify,
+    includeTools: invocation.includeTools,
+    excludeTools: invocation.excludeTools,
+    bundle: typeof invocation.bundle === 'boolean' ? invocation.bundle : undefined,
+    compile: invocation.compile,
+  };
+}
+
+function resolveImplicitTemplateDir(serverName: string, definition: ReturnType<typeof serializeDefinition>): string {
+  const hash = createHash('sha256').update(stableJsonStringify({ serverName, definition })).digest('hex').slice(0, 12);
+  return path.join(process.cwd(), 'tmp', 'mcporter-cli', `${sanitizePathSegment(serverName) || 'server'}-${hash}`);
+}
+
+function sanitizePathSegment(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 function applyToolFilters(tools: ServerToolInfo[], includeTools?: string[], excludeTools?: string[]): ServerToolInfo[] {

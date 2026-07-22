@@ -1,16 +1,21 @@
 const DEFAULT_LIST_TIMEOUT_MS = 30_000;
 const DEFAULT_CALL_TIMEOUT_MS = 60_000;
+const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
+
+export function parsePositiveInteger(raw: string | undefined): number | undefined {
+  if (!raw || !POSITIVE_INTEGER_PATTERN.test(raw)) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 // parseTimeout reads timeout values from strings while honoring defaults.
 export function parseTimeout(raw: string | undefined, fallback: number): number {
   if (!raw) {
     return fallback;
   }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return parsed;
+  return parsePositiveInteger(raw) ?? fallback;
 }
 
 export const LIST_TIMEOUT_MS = parseTimeout(process.env.MCPORTER_LIST_TIMEOUT, DEFAULT_LIST_TIMEOUT_MS);
@@ -58,8 +63,8 @@ export function consumeTimeoutFlag(
   if (!value) {
     throw new Error(missingValueMessage);
   }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const parsed = parsePositiveInteger(value);
+  if (parsed === undefined) {
     throw new Error(`${flagName} must be a positive integer (milliseconds).`);
   }
   args.splice(index, 2);

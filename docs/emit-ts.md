@@ -19,14 +19,14 @@ mcporter emit-ts <server> --out linear-client.ts \
 ```
 
 - `--mode types` (default) emits a `.d.ts` interface (`LinearTools`) with
-docblocks + promisified signatures. Missing output schemas fall back to
-`CallResult`.
+  docblocks + promisified signatures. Missing output schemas fall back to
+  `CallResult`.
 - `--mode client` emits both the interface (auto-derived `.d.ts`) **and** an
-executable `.ts` helper that wraps `createServerProxy`. Each method returns a
-`CallResult`, and the factory exposes a `close()` helper for runtimes the client
-creates.
+  executable `.ts` helper that wraps `createServerProxy`. Each method returns a
+  `CallResult`, and the factory exposes a `close()` helper for runtimes the client
+  creates.
 - `--include-optional` mirrors `mcporter list --all-parameters`, ensuring every
-parameter is shown even when optional.
+  parameter is shown even when optional.
 
 Outputs overwrite existing files automatically so you can regenerate artifacts
 whenever the server schema changes.
@@ -82,9 +82,9 @@ returned object’s `close()` becomes a no-op.
 ## Flags
 
 | Flag | Description |
-| --- | --- |
+| -------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------- |
 | `--out <path>` | Required. `.d.ts` target for `types`, `.ts` target for `client`. |
-| `--mode types|client` | Output kind (defaults to `types`). |
+| `--mode types        | client` | Output kind (defaults to `types`). |
 | `--types-out <path>` | Optional override for the `.d.ts` file when `--mode client`. Default: derive from `--out`. |
 | `--include-optional` | Include every parameter (not just the minimum 5 + required). |
 | `--json` | Emit a JSON summary describing the emitted file(s) instead of plain-text logs. |

@@ -1,4 +1,11 @@
-export type DaemonRequestMethod = 'callTool' | 'listTools' | 'listResources' | 'closeServer' | 'status' | 'stop';
+export type DaemonRequestMethod =
+  | 'callTool'
+  | 'listTools'
+  | 'listResources'
+  | 'readResource'
+  | 'closeServer'
+  | 'status'
+  | 'stop';
 
 export interface DaemonRequest<T extends DaemonRequestMethod = DaemonRequestMethod, P = unknown> {
   readonly id: string;
@@ -21,17 +28,29 @@ export interface CallToolParams {
   readonly tool: string;
   readonly args?: Record<string, unknown>;
   readonly timeoutMs?: number;
+  readonly disableOAuth?: boolean;
 }
 
 export interface ListToolsParams {
   readonly server: string;
   readonly includeSchema?: boolean;
   readonly autoAuthorize?: boolean;
+  readonly allowCachedAuth?: boolean;
+  readonly disableOAuth?: boolean;
 }
 
 export interface ListResourcesParams {
   readonly server: string;
   readonly params?: Record<string, unknown>;
+  readonly allowCachedAuth?: boolean;
+  readonly disableOAuth?: boolean;
+}
+
+export interface ReadResourceParams {
+  readonly server: string;
+  readonly uri: string;
+  readonly allowCachedAuth?: boolean;
+  readonly disableOAuth?: boolean;
 }
 
 export interface CloseServerParams {
@@ -47,6 +66,7 @@ export interface StatusResult {
     readonly path: string;
     readonly mtimeMs: number | null;
   }>;
+  readonly definitionHash?: string;
   readonly socketPath: string;
   readonly logPath?: string;
   readonly servers: Array<{

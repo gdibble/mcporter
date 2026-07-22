@@ -9,7 +9,8 @@ read_when:
 This doc tracks remaining reuse/refactor work now that the original plan is done.
 Each section lists the goal, why it matters, and the concrete steps/tests needed.
 
-## 1. Shared Tool Schema Cache *(Completed)*
+## 1. Shared Tool Schema Cache _(Completed)_
+
 - **Problem**: `generate-cli` and `emit-ts` both fetch & serialize tool schemas
   independently (and `mcporter list` re-parses them too).
 - **What we did**:
@@ -18,7 +19,8 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
   3. Added `tests/tool-cache.test.ts` + updated emit-ts tests to ensure the helper is covered.
 - **Next**: Consider integrating the cache into `generate-cli` if we ever reuse runtime instances there.
 
-## 2. Unified Flag Parsing for Generator-style Commands *(Completed)*
+## 2. Unified Flag Parsing for Generator-style Commands _(Completed)_
+
 - **Problem**: `generate-cli`, the (now legacy) `regenerate-cli` wrapper, and `emit-ts` each
   reimplemented `--runtime`, `--timeout`, and `--include-optional` handling.
 - **What we did**:
@@ -29,7 +31,8 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
   3. Added `tests/generator-flag-parser.test.ts` to cover runtime/timeout and
      optional flags.
 
-## 3. Test Fixture Reuse *(Completed)*
+## 3. Test Fixture Reuse _(Completed)_
+
 - **Problem**: Emit-ts/tool-cache/unit tests each defined their own tool/definition
   fixtures, leading to divergence.
 - **What we did**:
@@ -39,7 +42,8 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
   3. Ensured the fixture covers required+optional parameters so both suites hit
      the same edge cases.
 
-## 4. CallResult Helper Extraction *(Completed)*
+## 4. CallResult Helper Extraction _(Completed)_
+
 - **Problem**: `call-command.ts` and the emit-ts client template both wrapped
   results with `createCallResult`, but there was no shared helper.
 - **What we did**:
@@ -49,7 +53,8 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
      they stay in sync.
   3. Adjusted emit-ts tests to assert the helper is referenced.
 
-## 5. CLI Docs Consolidation *(Completed)*
+## 5. CLI Docs Consolidation _(Completed)_
+
 - **Problem**: CLI usage guidance was scattered across README, `docs/spec.md`,
   and various feature docs.
 - **What we did**:
@@ -60,7 +65,8 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
 - **Next**: Once the other doc changes land, update README/spec to link to the
   reference and drop redundant sections.
 
-## 6. Runtime Module Split *(Completed)*
+## 6. Runtime Module Split _(Completed)_
+
 - **Problem**: `src/runtime.ts` had grown bulky (600+ lines) mixing transport setup, OAuth flow control, and small helpers, making tests and reuse harder.
 - **What we did**:
   1. Extracted transport construction/retry logic to `src/runtime/transport.ts`.
@@ -72,5 +78,6 @@ Each section lists the goal, why it matters, and the concrete steps/tests needed
 - **Next**: Keep new helpers in sync as runtime evolves; prefer adding surface to these modules over growing `runtime.ts` again.
 
 ---
+
 Tracking the above here keeps future agents aligned. Update this checklist as
 items ship (mark sections “Completed” when done, or delete the doc once empty).

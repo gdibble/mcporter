@@ -3,15 +3,17 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { applyChromeDevtoolsCompat } from '../chrome-devtools-compat.js';
 import type { ServerDefinition } from '../config.js';
 import { resolveEnvValue, withEnvOverrides } from '../env.js';
 import { analyzeConnectionError } from '../error-classifier.js';
 import type { Logger } from '../logging.js';
-import { createOAuthSession, type OAuthSession } from '../oauth.js';
+import { createOAuthSession, type OAuthSession, type OAuthSessionOptions } from '../oauth.js';
 import { readCachedAccessToken } from '../oauth-persistence.js';
 import { materializeHeaders } from '../runtime-header-utils.js';
 import { isUnauthorizedError, maybeEnableOAuth } from '../runtime-oauth-support.js';
 import { closeTransportAndWait } from '../runtime-process-utils.js';
+import { nodeHttp1Fetch, sseIsolatedFetch } from './node-http-fetch.js';
 import {
   connectWithAuth,
   isOAuthFlowError,
@@ -19,6 +21,8 @@ import {
   type OAuthCapableTransport,
   OAuthTimeoutError,
 } from './oauth.js';
+import { RecordTransport } from './record-transport.js';
+import { ReplayTransport } from './replay-transport.js';
 import { resolveCommandArgument, resolveCommandArguments } from './utils.js';
 
 const STDIO_TRACE_ENABLED = process.env.MCPORTER_STDIO_TRACE === '1';
@@ -57,6 +61,7 @@ function isLegacySseTransportMismatch(error: unknown): boolean {
 interface ResolvedHttpTransportOptions {
   requestInit?: RequestInit;
   authProvider?: OAuthSession['provider'];
+  fetch?: typeof nodeHttp1Fetch;
 }
 
 type HttpClientContextAttempt =
@@ -80,6 +85,17 @@ export interface CreateClientContextOptions {
   readonly oauthTimeoutMs?: number;
   readonly onDefinitionPromoted?: (definition: ServerDefinition) => void;
   readonly allowCachedAuth?: boolean;
+  readonly oauthSessionOptions?: OAuthSessionOptions;
+  /**
+   * When `true`, suppress the interactive OAuth flow entirely. See
+   * `ConnectOptions.disableOAuth` in `runtime.ts` for the caller-facing
+   * semantics. Internally this short-circuits `shouldEstablishOAuth` and
+   * `maybePromoteHttpDefinition` so the unauthorized-fallback path
+   * cannot re-enable OAuth on a daemon-shaped caller.
+   */
+  readonly disableOAuth?: boolean;
+  readonly recordPath?: string;
+  readonly replayPath?: string;
 }
 
 function removeAuthorizationHeader(headers: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -108,11 +124,65 @@ function createHttpTransportOptions(
   return {
     requestInit: effectiveHeaders ? { headers: effectiveHeaders as HeadersInit } : undefined,
     authProvider: oauthSession?.provider,
+    fetch: resolveHttpFetchOverride(definition),
   };
+}
+
+const NODE_HTTP1_FETCH_HOSTS: ReadonlySet<string> = new Set(['api.sunsama.com']);
+
+function resolveHttpFetchOverride(definition: ServerDefinition): typeof nodeHttp1Fetch | undefined {
+  if (definition.command.kind !== 'http') {
+    return undefined;
+  }
+  if (definition.httpFetch === 'default') {
+    return undefined;
+  }
+  if (definition.httpFetch === 'node-http1') {
+    return nodeHttp1Fetch;
+  }
+  if (NODE_HTTP1_FETCH_HOSTS.has(definition.command.url.hostname.toLowerCase())) {
+    return nodeHttp1Fetch;
+  }
+  if ('bun' in process.versions) {
+    return undefined;
+  }
+  return sseIsolatedFetch;
 }
 
 async function closeOAuthSession(oauthSession?: OAuthSession): Promise<void> {
   await oauthSession?.close().catch(() => {});
+}
+
+function shouldUseModeForServer(definition: ServerDefinition, serverFilter: string | undefined): boolean {
+  return !serverFilter || serverFilter === definition.name;
+}
+
+function wrapRecordTransport<TTransport extends Transport>(
+  transport: TTransport,
+  definition: ServerDefinition,
+  options: CreateClientContextOptions
+): TTransport {
+  if (!options.recordPath || !shouldUseModeForServer(definition, process.env.MCPORTER_RECORD_SERVER)) {
+    return transport;
+  }
+  return new RecordTransport({
+    inner: transport,
+    recordPath: options.recordPath,
+    server: definition.name,
+  }) as unknown as TTransport;
+}
+
+async function createReplayClientContext(
+  client: Client,
+  definition: ServerDefinition,
+  replayPath: string
+): Promise<ClientContext> {
+  const transport = new ReplayTransport({
+    recordPath: replayPath,
+    server: definition.name,
+  });
+  await client.connect(transport);
+  return { client, transport, definition, oauthSession: undefined };
 }
 
 function shouldAbortSseFallback(error: unknown): boolean {
@@ -122,12 +192,20 @@ function shouldAbortSseFallback(error: unknown): boolean {
   return isOAuthFlowError(error) || error instanceof OAuthTimeoutError;
 }
 
+function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+  return Boolean(headers && Object.keys(headers).some((key) => key.toLowerCase() === 'authorization'));
+}
+
 function maybePromoteHttpDefinition(
   definition: ServerDefinition,
   logger: Logger,
   options: CreateClientContextOptions
 ): ServerDefinition | undefined {
-  if (options.maxOAuthAttempts === 0) {
+  // Both flags suppress promotion-to-OAuth on a 401 fallback. Without
+  // this guard, a daemon-mode caller hitting an unauthorized response
+  // could trigger `maybeEnableOAuth` and effectively re-enable OAuth
+  // on the next attempt — defeating the no-browser-launch contract.
+  if (options.maxOAuthAttempts === 0 || options.disableOAuth === true) {
     return undefined;
   }
   return maybeEnableOAuth(definition, logger);
@@ -148,21 +226,55 @@ async function connectHttpTransport<TTransport extends OAuthCapableTransport>(
   }
 }
 
-async function applyCachedOAuthHeaderIfAvailable(
+async function applyCachedAuthIfAvailable(
   definition: ServerDefinition,
   logger: Logger,
   allowCachedAuth: boolean | undefined
 ): Promise<ServerDefinition> {
-  if (!allowCachedAuth || definition.auth !== 'oauth' || definition.command.kind !== 'http') {
+  if (!allowCachedAuth && definition.auth !== 'refreshable_bearer') {
+    return definition;
+  }
+  if (
+    definition.auth === 'refreshable_bearer' &&
+    definition.command.kind === 'stdio' &&
+    !definition.refresh?.accessTokenEnv
+  ) {
+    throw new Error(
+      `Server '${definition.name}' uses refreshable_bearer stdio auth but is missing refresh.accessTokenEnv.`
+    );
+  }
+  if (definition.command.kind === 'http' && hasAuthorizationHeader(definition.command.headers)) {
     return definition;
   }
   try {
     const cached = await readCachedAccessToken(definition, logger);
     if (!cached) {
+      if (definition.auth === 'refreshable_bearer') {
+        throw new Error(`Server '${definition.name}' uses refreshable_bearer auth but has no cached access token.`);
+      }
       return definition;
     }
+    if (definition.command.kind === 'stdio') {
+      if (definition.auth !== 'refreshable_bearer') {
+        return definition;
+      }
+      const accessTokenEnv = definition.refresh?.accessTokenEnv;
+      if (!accessTokenEnv) {
+        throw new Error(
+          `Server '${definition.name}' uses refreshable_bearer stdio auth but is missing refresh.accessTokenEnv.`
+        );
+      }
+      logger.debug?.(`Using cached bearer access token for '${definition.name}' stdio env.`);
+      return {
+        ...definition,
+        env: {
+          ...definition.env,
+          [accessTokenEnv]: cached,
+        },
+      };
+    }
     const existingHeaders = definition.command.headers ?? {};
-    if ('Authorization' in existingHeaders) {
+    if (hasAuthorizationHeader(existingHeaders)) {
       return definition;
     }
     logger.debug?.(`Using cached OAuth access token for '${definition.name}' (non-interactive).`);
@@ -177,6 +289,9 @@ async function applyCachedOAuthHeaderIfAvailable(
       },
     };
   } catch (error) {
+    if (definition.auth === 'refreshable_bearer') {
+      throw error;
+    }
     logger.debug?.(
       `Failed to read cached OAuth token for '${definition.name}': ${
         error instanceof Error ? error.message : String(error)
@@ -189,7 +304,8 @@ async function applyCachedOAuthHeaderIfAvailable(
 async function createStdioClientContext(
   client: Client,
   definition: ServerDefinition & { command: Extract<ServerDefinition['command'], { kind: 'stdio' }> },
-  logger: Logger
+  logger: Logger,
+  options: CreateClientContextOptions
 ): Promise<ClientContext> {
   const resolvedEnvOverrides =
     definition.env && Object.keys(definition.env).length > 0
@@ -203,15 +319,22 @@ async function createStdioClientContext(
     resolvedEnvOverrides && Object.keys(resolvedEnvOverrides).length > 0
       ? { ...process.env, ...resolvedEnvOverrides }
       : { ...process.env };
-  const transport = new StdioClientTransport({
-    command: resolveCommandArgument(definition.command.command),
-    args: resolveCommandArguments(definition.command.args),
+  const command = resolveCommandArgument(definition.command.command);
+  const commandArgs = resolveCommandArguments(definition.command.args);
+  const compat = applyChromeDevtoolsCompat(mergedEnv as Record<string, string>, command, commandArgs);
+  if (compat.applied) {
+    logger.info(`Injecting chrome-devtools-mcp --autoConnect compatibility patch from ${compat.patchPath}.`);
+  }
+  const rawTransport = new StdioClientTransport({
+    command,
+    args: commandArgs,
     cwd: definition.command.cwd,
-    env: mergedEnv,
+    env: compat.env,
   });
   if (STDIO_TRACE_ENABLED) {
-    attachStdioTraceLogging(transport, definition.name ?? definition.command.command);
+    attachStdioTraceLogging(rawTransport, definition.name ?? definition.command.command);
   }
+  const transport = wrapRecordTransport(rawTransport, definition, options);
   try {
     await client.connect(transport);
   } catch (error) {
@@ -249,9 +372,10 @@ async function attemptHttpClientContext(
     throw new Error(`Server '${activeDefinition.name}' is not configured for HTTP transport.`);
   }
   let oauthSession: OAuthSession | undefined;
-  const shouldEstablishOAuth = activeDefinition.auth === 'oauth' && options.maxOAuthAttempts !== 0;
+  const shouldEstablishOAuth =
+    activeDefinition.auth === 'oauth' && options.maxOAuthAttempts !== 0 && options.disableOAuth !== true;
   if (shouldEstablishOAuth) {
-    oauthSession = await createOAuthSession(activeDefinition, logger);
+    oauthSession = await createOAuthSession(activeDefinition, logger, options.oauthSessionOptions);
   }
   const transportOptions = createHttpTransportOptions(activeDefinition, oauthSession, shouldEstablishOAuth);
 
@@ -276,6 +400,9 @@ async function attemptHttpClientContext(
       const promoted = maybePromoteHttpDefinition(activeDefinition, logger, options);
       if (promoted) {
         return { nextDefinition: promoted };
+      }
+      if (activeDefinition.auth) {
+        throw primaryError;
       }
       oauthSession = undefined;
     }
@@ -305,9 +432,11 @@ async function connectPrimaryHttpTransport(
   logger: Logger,
   options: CreateClientContextOptions
 ): Promise<ClientContext> {
-  const createStreamableTransport = () => new StreamableHTTPClientTransport(command.url, transportOptions);
+  const createStreamableTransport = () =>
+    wrapRecordTransport(new StreamableHTTPClientTransport(command.url, transportOptions), definition, options);
   const transport = await connectHttpTransport(client, createStreamableTransport(), oauthSession, logger, {
     serverName: definition.name,
+    serverUrl: command.url,
     maxAttempts: options.maxOAuthAttempts,
     oauthTimeoutMs: options.oauthTimeoutMs,
     recreateTransport: async () => createStreamableTransport(),
@@ -332,11 +461,12 @@ async function connectSseFallbackTransport(
   try {
     const transport = await connectHttpTransport(
       client,
-      new SSEClientTransport(command.url, transportOptions),
+      wrapRecordTransport(new SSEClientTransport(command.url, transportOptions), definition, options),
       oauthSession,
       logger,
       {
         serverName: definition.name,
+        serverUrl: command.url,
         maxAttempts: options.maxOAuthAttempts,
         oauthTimeoutMs: options.oauthTimeoutMs,
       }
@@ -353,6 +483,9 @@ async function connectSseFallbackTransport(
         options.onDefinitionPromoted?.(promoted);
         return retryHttpTransportWithFallback(client, promoted, logger, options);
       }
+      if (definition.auth) {
+        throw sseError;
+      }
     }
     throw sseError;
   }
@@ -365,14 +498,18 @@ export async function createClientContext(
   options: CreateClientContextOptions = {}
 ): Promise<ClientContext> {
   const client = new Client(clientInfo);
-  const activeDefinition = await applyCachedOAuthHeaderIfAvailable(definition, logger, options.allowCachedAuth);
+  if (options.replayPath && shouldUseModeForServer(definition, process.env.MCPORTER_REPLAY_SERVER)) {
+    return createReplayClientContext(client, definition, options.replayPath);
+  }
+  const activeDefinition = await applyCachedAuthIfAvailable(definition, logger, options.allowCachedAuth);
 
   return withEnvOverrides(activeDefinition.env, async () => {
     if (activeDefinition.command.kind === 'stdio') {
       return createStdioClientContext(
         client,
         activeDefinition as ServerDefinition & { command: Extract<ServerDefinition['command'], { kind: 'stdio' }> },
-        logger
+        logger,
+        options
       );
     }
     return retryHttpTransportWithFallback(client, activeDefinition, logger, options);

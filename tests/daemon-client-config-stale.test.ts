@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeShortTempDir } from './fixtures/test-helpers.js';
 
 const sentMethods: string[] = [];
-let launchDaemonDetached: ReturnType<typeof vi.fn>;
+const launchDaemonDetached = vi.hoisted(() => vi.fn());
 let createConnection: ReturnType<typeof vi.fn>;
 
 class MockSocket extends EventEmitter {
@@ -40,7 +40,7 @@ function buildResponse(method: string, id: string) {
       id,
       ok: true,
       result: {
-        pid: 123,
+        pid: activeStatusPid,
         startedAt: Date.now(),
         configPath: activeConfigPath,
         configMtimeMs: activeConfigMtime,
@@ -59,6 +59,7 @@ function buildResponse(method: string, id: string) {
 
 let activeConfigPath: string;
 let activeConfigMtime: number | null = null;
+let activeStatusPid = process.pid;
 let activeSocketPath: string;
 let previousDaemonDir: string | undefined;
 let activeLayers: Array<{ path: string; mtimeMs: number | null }> = [];
@@ -73,7 +74,6 @@ vi.mock('node:net', () => {
 });
 
 vi.mock('../src/daemon/launch.js', () => {
-  launchDaemonDetached = vi.fn();
   return { launchDaemonDetached };
 });
 
@@ -85,6 +85,28 @@ describe('DaemonClient config freshness', () => {
     previousDaemonDir = process.env.MCPORTER_DAEMON_DIR;
     activeLayers = [];
     launchDaemonDetached.mockClear();
+    launchDaemonDetached.mockImplementation(
+      (options: { metadataPath: string; socketPath: string; configPath: string }) => {
+        activeStatusPid = process.pid;
+        void fs.writeFile(
+          options.metadataPath,
+          JSON.stringify(
+            {
+              pid: process.pid,
+              socketPath: options.socketPath,
+              configPath: options.configPath,
+              startedAt: Date.now(),
+              logPath: null,
+              configMtimeMs: activeConfigMtime,
+              configLayers: activeLayers,
+            },
+            null,
+            2
+          ),
+          'utf8'
+        );
+      }
+    );
   });
 
   afterEach(async () => {
@@ -103,10 +125,12 @@ describe('DaemonClient config freshness', () => {
     await fs.writeFile(configPath, JSON.stringify({ mcpServers: {} }), 'utf8');
     const stat = await fs.stat(configPath);
     const oldMtime = stat.mtimeMs - 1000;
+    const deadPid = findNonRunningPid();
     const { metadataPath, socketPath } = resolveDaemonPaths(configPath);
     activeConfigPath = configPath;
     activeSocketPath = socketPath;
     activeConfigMtime = stat.mtimeMs;
+    activeStatusPid = deadPid;
     activeLayers = [{ path: configPath, mtimeMs: stat.mtimeMs }];
 
     await fs.mkdir(path.dirname(metadataPath), { recursive: true });
@@ -114,7 +138,7 @@ describe('DaemonClient config freshness', () => {
       metadataPath,
       JSON.stringify(
         {
-          pid: 1111,
+          pid: deadPid,
           socketPath,
           configPath,
           startedAt: Date.now() - 10_000,
@@ -144,10 +168,12 @@ describe('DaemonClient config freshness', () => {
     const configPath = path.join(tmpDir, 'config.json');
     await fs.writeFile(configPath, JSON.stringify({ mcpServers: {} }), 'utf8');
     const stat = await fs.stat(configPath);
+    const deadPid = findNonRunningPid();
     const { metadataPath, socketPath } = resolveDaemonPaths(configPath);
     activeConfigPath = configPath;
     activeSocketPath = socketPath;
     activeConfigMtime = stat.mtimeMs;
+    activeStatusPid = deadPid;
     activeLayers = [{ path: configPath, mtimeMs: stat.mtimeMs }];
 
     await fs.mkdir(path.dirname(metadataPath), { recursive: true });
@@ -155,7 +181,7 @@ describe('DaemonClient config freshness', () => {
       metadataPath,
       JSON.stringify(
         {
-          pid: 1111,
+          pid: deadPid,
           socketPath,
           configPath,
           startedAt: Date.now() - 10_000,
@@ -190,6 +216,7 @@ describe('DaemonClient config freshness', () => {
     activeConfigPath = configPath;
     activeSocketPath = socketPath;
     activeConfigMtime = stat.mtimeMs;
+    activeStatusPid = process.pid;
     activeLayers = [{ path: configPath, mtimeMs: stat.mtimeMs }];
 
     await fs.mkdir(path.dirname(metadataPath), { recursive: true });
@@ -197,7 +224,7 @@ describe('DaemonClient config freshness', () => {
       metadataPath,
       JSON.stringify(
         {
-          pid: 1111,
+          pid: process.pid,
           socketPath,
           configPath,
           startedAt: Date.now() - 10_000,
@@ -214,9 +241,21 @@ describe('DaemonClient config freshness', () => {
     const client = new DaemonClient({ configPath, configExplicit: true, rootDir: tmpDir });
     await client.listTools({ server: 'playwright' });
 
-    expect(sentMethods[0]).toBe('status');
-    expect(sentMethods).toContain('listTools');
+    expect(sentMethods).toEqual(['status', 'listTools']);
     expect(sentMethods).not.toContain('stop');
     expect(launchDaemonDetached).not.toHaveBeenCalled();
   });
 });
+
+function findNonRunningPid(): number {
+  for (let pid = process.pid + 100_000; pid < process.pid + 101_000; pid += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+        return pid;
+      }
+    }
+  }
+  throw new Error('Unable to find a non-running pid for daemon tests.');
+}

@@ -1,0 +1,84 @@
+import { analyzeConnectionError } from '../error-classifier.js';
+import { wrapCallResult } from '../result-utils.js';
+import { buildConnectionIssueEnvelope, formatErrorMessage } from './json-output.js';
+import { consumeOutputFormat } from './output-format.js';
+import { printCallOutput } from './output-utils.js';
+
+type Runtime = Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>;
+
+export async function handleResource(runtime: Runtime, args: string[]): Promise<void> {
+  const output = consumeOutputFormat(args, {
+    defaultFormat: 'auto',
+    allowed: ['auto', 'text', 'markdown', 'json', 'raw'],
+    enableRawShortcut: true,
+    jsonShortcutFlag: '--json',
+  });
+  const disableOAuth = consumeDisableOAuthFlag(args);
+  const server = args.shift();
+  if (!server) {
+    throw new Error('Missing server name. Usage: mcporter resource <server> [uri]');
+  }
+  const uri = args.shift();
+  if (args.length > 0) {
+    throw new Error(`Unexpected resource arguments: ${args.join(' ')}`);
+  }
+
+  let result: unknown;
+  try {
+    if (disableOAuth === undefined) {
+      result = uri ? await runtime.readResource(server, uri) : await runtime.listResources(server);
+    } else {
+      const connectOptions = { disableOAuth };
+      result = uri
+        ? await runtime.readResource(server, uri, connectOptions)
+        : await runtime.listResources(server, connectOptions);
+    }
+  } catch (error) {
+    const issue = analyzeConnectionError(error);
+    if (output === 'json' || output === 'raw') {
+      console.log(JSON.stringify(buildConnectionIssueEnvelope({ server, error, issue }), null, 2));
+    } else {
+      console.error(`[mcporter] ${formatErrorMessage(error)}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  const { callResult } = wrapCallResult(result);
+  printCallOutput(callResult, result, output);
+}
+
+function consumeDisableOAuthFlag(args: string[]): boolean | undefined {
+  let disableOAuth: boolean | undefined;
+  for (let index = 0; index < args.length;) {
+    const token = args[index];
+    if (token === '--no-oauth') {
+      disableOAuth = true;
+      args.splice(index, 1);
+      continue;
+    }
+    index += 1;
+  }
+  return disableOAuth;
+}
+
+export function printResourceHelp(): void {
+  console.error(
+    [
+      'Usage: mcporter resource <server> [uri] [flags]',
+      '',
+      'Without a URI, lists resources exposed by the server.',
+      'With a URI, reads that MCP resource and prints text/markdown/json content when possible.',
+      '',
+      'Flags:',
+      '  --output auto|text|markdown|json|raw  Choose output rendering.',
+      '  --json                               Shortcut for --output json.',
+      '  --raw                                Shortcut for --output raw.',
+      '  --no-oauth                          Never start OAuth; use cached tokens only.',
+      '',
+      'Examples:',
+      '  mcporter resource docs',
+      '  mcporter resource docs file:///repo/README.md',
+      '  mcporter resource docs greeting://Peter --output text',
+    ].join('\n')
+  );
+}

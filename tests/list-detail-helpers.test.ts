@@ -95,6 +95,36 @@ describe('formatFunctionSignature', () => {
     expect(signature).toBe('function create_comment(issueId: string, parentId?: string): Comment;');
   });
 
+  it('renders array parameters from their schema item types', () => {
+    const signature = formatFunctionSignature(
+      'filter_docs',
+      [
+        baseOption({ property: 'names', type: 'array', arrayItemType: 'string' }),
+        baseOption({ property: 'scores', type: 'array', arrayItemType: 'number' }),
+        baseOption({ property: 'enabled', type: 'array', arrayItemType: 'boolean' }),
+        baseOption({ property: 'metadata', type: 'array', arrayItemType: 'object' }),
+        baseOption({ property: 'unknownItems', type: 'array', arrayItemType: 'unknown' }),
+        baseOption({ property: 'missingItems', type: 'array' }),
+      ],
+      undefined,
+      { colorize: false }
+    );
+
+    expect(signature).toBe(
+      'function filter_docs(names: string[], scores: number[], enabled: boolean[], metadata: Record<string, unknown>[], unknownItems: unknown[], missingItems: unknown[]);'
+    );
+  });
+
+  it('normalizes integer item output schemas to number arrays', () => {
+    const signature = formatFunctionSignature(
+      'list_ids',
+      [],
+      { type: 'array', items: { type: 'integer' } },
+      { colorize: false }
+    );
+    expect(signature).toBe('function list_ids(): number[];');
+  });
+
   it('falls back to unknown return types when schema is empty', () => {
     const signature = stripAnsi(formatFunctionSignature('list_docs', [], undefined));
     expect(signature).toBe('function list_docs();');
@@ -119,6 +149,24 @@ describe('formatCallExpressionExample', () => {
       { callSelector: 'https://mcp.sentry.dev/mcp?agent=1', wrapExpression: true }
     );
     expect(example).toBe('mcporter call \'https://mcp.sentry.dev/mcp?agent=1.use_sentry(request: "value")\'');
+  });
+
+  it('keeps array examples consistent with their item types', () => {
+    const example = formatCallExpressionExample('fixture', 'array_probe', [
+      baseOption({ property: 'scores', type: 'array', arrayItemType: 'number', exampleValue: '1,2' }),
+      baseOption({ property: 'flags', type: 'array', arrayItemType: 'boolean', exampleValue: 'true,false' }),
+      baseOption({
+        property: 'records',
+        type: 'array',
+        arrayItemType: 'object',
+        exampleValue: '[{"key":"value"}]',
+      }),
+      baseOption({ property: 'names', type: 'array', arrayItemType: 'string', exampleValue: 'value1,value2' }),
+    ]);
+
+    expect(example).toBe(
+      'mcporter call fixture.array_probe(scores: [1, 2], flags: [true, false], records: [{"key":"value"}], names: ["value1", "value2"])'
+    );
   });
 });
 

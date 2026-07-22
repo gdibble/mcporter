@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import type { LoadConfigOptions, RawConfig } from '../../config.js';
 import { loadRawConfig, resolveConfigPath } from '../../config.js';
 import type { ServerDefinition } from '../../config-schema.js';
+import { mcporterConfigCandidates } from '../../paths.js';
 import { CliUsageError } from '../errors.js';
 import { chooseClosestIdentifier, renderIdentifierResolutionMessages } from '../identifier-helpers.js';
 import { dimText, supportsAnsiColor } from '../terminal.js';
@@ -26,8 +26,8 @@ export function cloneConfig(config: RawConfig): RawConfig {
 
 export async function loadOrCreateConfig(loadOptions: LoadConfigOptions): Promise<{ config: RawConfig; path: string }> {
   try {
-    const { config, path } = await loadRawConfig(loadOptions);
-    return { config, path };
+    const { config, path: configPath } = await loadRawConfig(loadOptions);
+    return { config, path: configPath };
   } catch (error) {
     if (isErrno(error, 'ENOENT')) {
       const rootDir = loadOptions.rootDir ?? process.cwd();
@@ -127,9 +127,7 @@ export function resolveServerDefinition(
 }
 
 function buildSystemConfigCandidates(): string[] {
-  const homeDir = os.homedir();
-  const base = path.join(homeDir, '.mcporter');
-  return [path.join(base, 'mcporter.json'), path.join(base, 'mcporter.jsonc')];
+  return mcporterConfigCandidates();
 }
 
 async function resolveFirstExisting(pathsToCheck: string[]): Promise<{ path: string; exists: boolean }> {

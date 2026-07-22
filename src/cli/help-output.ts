@@ -1,5 +1,5 @@
 import fsPromises from 'node:fs/promises';
-import { MCPORTER_VERSION } from '../runtime.js';
+import { MCPORTER_VERSION } from '../version.js';
 import { boldText, dimText, extraDimText, supportsAnsiColor } from './terminal.js';
 
 type HelpEntry = {
@@ -58,9 +58,29 @@ function buildCommandSections(colorize: boolean): string[] {
           usage: 'mcporter call <selector> [key=value ...]',
         },
         {
+          name: 'resource',
+          summary: 'List or read MCP resources exposed by a server',
+          usage: 'mcporter resource <server> [uri]',
+        },
+        {
           name: 'auth',
           summary: 'Complete OAuth for a server without listing tools',
           usage: 'mcporter auth <server | url> [--reset]',
+        },
+        {
+          name: 'vault',
+          summary: 'Seed or clear OAuth credentials non-interactively',
+          usage: 'mcporter vault set <server> --tokens-file <path>',
+        },
+        {
+          name: 'record',
+          summary: 'Capture MCP JSON-RPC traffic to NDJSON',
+          usage: 'mcporter record <session-name> [--server <name>] [-- <command>]',
+        },
+        {
+          name: 'replay',
+          summary: 'Replay recorded MCP JSON-RPC traffic deterministically',
+          usage: 'mcporter replay <session-name> [--server <name>] [-- <command>]',
         },
       ],
     },
@@ -102,6 +122,11 @@ function buildCommandSections(colorize: boolean): string[] {
           summary: 'Manage the keep-alive daemon (start | status | stop | restart)',
           usage: 'mcporter daemon <subcommand>',
         },
+        {
+          name: 'serve',
+          summary: 'Expose daemon-managed keep-alive servers as one MCP server',
+          usage: 'mcporter serve [--servers a,b,c] [--stdio | --http <port>]',
+        },
       ],
     },
   ];
@@ -139,7 +164,7 @@ function formatGlobalFlags(colorize: boolean): string {
     },
     {
       flag: '--oauth-timeout <ms>',
-      summary: 'Time to wait for browser-based OAuth before giving up (default 60000)',
+      summary: 'Time to wait for browser-based OAuth before giving up (default 300000)',
     },
   ];
   const formatted = entries.map((entry) => `  ${entry.flag.padEnd(34)}${entry.summary}`);

@@ -28,7 +28,7 @@ function walkMarkdownFiles(dir: string, base: string = dir): string[] {
       files.push(relative(base, fullPath));
     }
   }
-  return files.sort((a, b) => a.localeCompare(b));
+  return files.toSorted((a, b) => a.localeCompare(b));
 }
 
 function extractMetadata(fullPath: string): {

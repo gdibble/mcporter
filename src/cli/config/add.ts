@@ -1,9 +1,9 @@
-import os from 'node:os';
 import path from 'node:path';
-import type { LoadConfigOptions, RawEntry } from '../../config.js';
-import { writeRawConfig } from '../../config.js';
+import { writeRawConfig, type LoadConfigOptions, type RawEntry } from '../../config.js';
 import { pathsForImport, readExternalEntries } from '../../config-imports.js';
 import { expandHome } from '../../env.js';
+import { withFileLock } from '../../fs-json.js';
+import { mcporterDir } from '../../paths.js';
 import { CliUsageError } from '../errors.js';
 import { cloneConfig, loadOrCreateConfig } from './shared.js';
 import type { ConfigCliOptions } from './types.js';
@@ -19,6 +19,9 @@ export type AddFlags = {
   headers: Record<string, string>;
   tokenCacheDir?: string;
   clientName?: string;
+  oauthClientId?: string;
+  oauthClientSecretEnv?: string;
+  oauthTokenEndpointAuthMethod?: string;
   oauthRedirectUrl?: string;
   auth?: string;
   copyFrom?: string;
@@ -40,9 +43,6 @@ export async function handleAddCommand(options: ConfigCliOptions, args: string[]
 
   const targetPath = resolveWriteTarget(flags, options.loadOptions, options.loadOptions.rootDir ?? process.cwd());
   const effectiveLoadOptions: LoadConfigOptions = { ...options.loadOptions, configPath: targetPath };
-
-  const { config, path: configPath } = await loadOrCreateConfig(effectiveLoadOptions);
-  const nextConfig = cloneConfig(config);
 
   const baseEntry = await resolveBaseEntry(flags.copyFrom, options.loadOptions);
   const entry: RawEntry = baseEntry ? { ...baseEntry } : {};
@@ -69,18 +69,23 @@ export async function handleAddCommand(options: ConfigCliOptions, args: string[]
     throw new CliUsageError('Server definitions require either a --url/target or a stdio command.');
   }
 
-  if (!nextConfig.mcpServers) {
-    nextConfig.mcpServers = {};
-  }
-  nextConfig.mcpServers[name] = entry;
-
   if (flags.dryRun) {
     console.log(JSON.stringify({ [name]: entry }, null, 2));
     console.log('(dry-run) No changes were written.');
     return;
   }
 
-  await writeRawConfig(configPath, nextConfig);
+  let configPath = targetPath;
+  await withFileLock(targetPath, async () => {
+    const loaded = await loadOrCreateConfig(effectiveLoadOptions);
+    configPath = loaded.path;
+    const nextConfig = cloneConfig(loaded.config);
+    if (!nextConfig.mcpServers) {
+      nextConfig.mcpServers = {};
+    }
+    nextConfig.mcpServers[name] = entry;
+    await writeRawConfig(configPath, nextConfig);
+  });
   console.log(`Added '${name}' to ${configPath}`);
 }
 
@@ -89,7 +94,7 @@ export function resolveWriteTarget(flags: AddFlags, loadOptions: LoadConfigOptio
     return path.resolve(expandHome(flags.persistPath));
   }
   if (flags.scope === 'home') {
-    return path.join(os.homedir(), '.mcporter', 'mcporter.json');
+    return path.join(mcporterDir('config'), 'mcporter.json');
   }
   if (flags.scope === 'project') {
     return path.resolve(rootDir, 'config', 'mcporter.json');
@@ -147,6 +152,18 @@ function extractAddFlags(args: string[]): AddFlags {
         flags.clientName = requireValue(args, index, token);
         args.splice(index, 2);
         continue;
+      case '--oauth-client-id':
+        flags.oauthClientId = requireValue(args, index, token);
+        args.splice(index, 2);
+        continue;
+      case '--oauth-client-secret-env':
+        flags.oauthClientSecretEnv = requireValue(args, index, token);
+        args.splice(index, 2);
+        continue;
+      case '--oauth-token-endpoint-auth-method':
+        flags.oauthTokenEndpointAuthMethod = requireValue(args, index, token);
+        args.splice(index, 2);
+        continue;
       case '--oauth-redirect-url':
         flags.oauthRedirectUrl = requireValue(args, index, token);
         args.splice(index, 2);
@@ -202,7 +219,7 @@ function parseTransport(value: string | undefined): 'http' | 'sse' | 'stdio' {
 }
 
 function parseKeyValue(input: string | undefined, target: Record<string, string>, flagName: string): void {
-  if (!input || !input.includes('=')) {
+  if (!input?.includes('=')) {
     throw new CliUsageError(`${flagName} requires KEY=value.`);
   }
   const [key, ...rest] = input.split('=');
@@ -283,6 +300,15 @@ function applyFlagsToEntry(entry: RawEntry, flags: AddFlags): void {
   }
   if (flags.clientName) {
     entry.clientName = flags.clientName;
+  }
+  if (flags.oauthClientId) {
+    entry.oauthClientId = flags.oauthClientId;
+  }
+  if (flags.oauthClientSecretEnv) {
+    entry.oauthClientSecretEnv = flags.oauthClientSecretEnv;
+  }
+  if (flags.oauthTokenEndpointAuthMethod) {
+    entry.oauthTokenEndpointAuthMethod = flags.oauthTokenEndpointAuthMethod;
   }
   if (flags.oauthRedirectUrl) {
     entry.oauthRedirectUrl = flags.oauthRedirectUrl;

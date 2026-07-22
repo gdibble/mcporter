@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   listConfigLayerPaths as discoverConfigLayerPaths,
@@ -17,6 +16,7 @@ import {
   type ServerSource,
 } from './config-schema.js';
 import { expandHome } from './env.js';
+import { writeTextFileAtomic } from './fs-json.js';
 
 export { toFileUrl } from './config-imports.js';
 export { __configInternals } from './config-normalize.js';
@@ -26,6 +26,8 @@ export type {
   LoadConfigOptions,
   RawConfig,
   RawEntry,
+  RawLifecycle,
+  RefreshableBearerOptions,
   ServerDefinition,
   ServerLifecycle,
   ServerLoggingOptions,
@@ -56,10 +58,16 @@ export async function loadServerDefinitions(options: LoadConfigOptions = {}): Pr
           continue;
         }
         for (const [name, rawEntry] of entries) {
+          const source: ServerSource = { kind: 'import', path: resolved, importKind };
+          const baseDir = path.dirname(resolved);
+          try {
+            normalizeServerEntry(name, rawEntry, baseDir, source, [source]);
+          } catch {
+            continue;
+          }
           if (merged.has(name)) {
             continue;
           }
-          const source: ServerSource = { kind: 'import', path: resolved, importKind };
           const existing = merged.get(name);
           // Keep the first-seen source as canonical while tracking all alternates
           if (existing) {
@@ -68,7 +76,7 @@ export async function loadServerDefinitions(options: LoadConfigOptions = {}): Pr
           }
           merged.set(name, {
             raw: rawEntry,
-            baseDir: path.dirname(resolved),
+            baseDir,
             source,
             sources: [source],
           });
@@ -97,10 +105,33 @@ export async function loadServerDefinitions(options: LoadConfigOptions = {}): Pr
 
   const servers: ServerDefinition[] = [];
   for (const [name, { raw, baseDir: entryBaseDir, source, sources }] of merged) {
-    servers.push(normalizeServerEntry(name, raw, entryBaseDir, source, sources));
+    try {
+      servers.push(normalizeServerEntry(name, raw, entryBaseDir, source, sources));
+    } catch (error) {
+      if (source.kind !== 'import') {
+        throw error;
+      }
+    }
   }
 
   return servers;
+}
+
+export interface DaemonConfig {
+  readonly idleTimeoutMs?: number;
+}
+
+export async function loadDaemonConfig(options: LoadConfigOptions = {}): Promise<DaemonConfig> {
+  const rootDir = options.rootDir ?? process.cwd();
+  const layers = await loadConfigLayers(options, rootDir);
+  let idleTimeoutMs: number | undefined;
+  for (const layer of layers) {
+    const raw = layer.config.daemonIdleTimeoutMs ?? layer.config.daemon_idle_timeout_ms;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      idleTimeoutMs = Math.trunc(raw);
+    }
+  }
+  return { idleTimeoutMs };
 }
 
 export async function loadRawConfig(
@@ -120,9 +151,8 @@ export async function listConfigLayerPaths(
 }
 
 export async function writeRawConfig(targetPath: string, config: RawConfig): Promise<void> {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
   const serialized = `${JSON.stringify(config, null, 2)}\n`;
-  await fs.writeFile(targetPath, serialized, 'utf8');
+  await writeTextFileAtomic(targetPath, serialized);
 }
 
 export function resolveConfigPath(

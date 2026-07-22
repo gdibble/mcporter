@@ -1,13 +1,27 @@
 {
   "name": "mcporter",
-  "version": "0.8.1",
+  "version": "0.12.4",
   "description": "TypeScript runtime and CLI for connecting to configured Model Context Protocol servers.",
-  "packageManager": "pnpm@10.22.0",
-  "pnpm": {
-    "overrides": {
-      "body-parser": "2.2.1"
-    }
+  "keywords": [
+    "cli",
+    "mcp",
+    "model-context-protocol",
+    "sweetistics"
+  ],
+  "license": "MIT",
+  "author": "Sweetistics",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openclaw/mcporter.git"
   },
+  "bin": {
+    "mcporter": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -22,88 +36,78 @@
       "types": "./dist/cli.d.ts"
     }
   },
-  "bin": {
-    "mcporter": "dist/cli.js"
+  "publishConfig": {
+    "access": "public"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "mcporter": "tsx src/cli.ts",
     "mcp": "pnpm exec tsx src/cli.ts",
     "build": "tsc -p tsconfig.build.json",
     "build:bun": "bun scripts/build-bun.ts",
-    "check": "pnpm lint:biome && pnpm lint:oxlint && pnpm typecheck",
+    "check": "pnpm format:check && pnpm lint:oxlint && pnpm typecheck",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
     "lint": "pnpm check",
-    "lint:biome": "biome check",
-    "lint:oxlint": "oxlint --type-aware --tsconfig tsconfig.json --max-warnings=0",
-    "typecheck": "tsgo --project tsconfig.json --noEmit",
+    "lint:oxlint": "oxlint --type-aware --tsconfig tsconfig.json --report-unused-disable-directives --deny-warnings --max-warnings=0 --allow eslint/no-underscore-dangle",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "cross-env MCPORTER_TEST_REPORTER=quiet pnpm test:verbose",
     "test:quiet": "cross-env MCPORTER_TEST_REPORTER=quiet pnpm test:verbose",
-    "test:verbose": "node scripts/test-runner.js",
+    "test:verbose": "pnpm build && node scripts/test-runner.js",
     "test:live": "MCP_LIVE_TESTS=1 vitest run tests/live",
     "clean": "rimraf dist",
     "dev": "tsc -w -p tsconfig.build.json",
     "prepublishOnly": "pnpm check && pnpm test && pnpm build",
     "docs:list": "pnpm exec tsx scripts/docs-list.ts",
+    "docs:site": "node scripts/build-docs-site.mjs",
     "generate:schema": "tsx scripts/generate-json-schema.ts",
     "mcporter:list": "pnpm exec tsx src/cli.ts list",
-    "mcporter:call": "pnpm exec tsx src/cli.ts call"
+    "mcporter:call": "pnpm exec tsx src/cli.ts call",
+    "check:changed": "pnpm run check",
+    "test:changed": "pnpm run test",
+    "crabbox:hydrate": "crabbox actions hydrate",
+    "crabbox:run": "crabbox run",
+    "crabbox:stop": "crabbox stop",
+    "crabbox:warmup": "crabbox warmup"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "acorn": "^8.16.0",
-    "commander": "^14.0.3",
-    "es-toolkit": "^1.45.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "acorn": "^8.17.0",
+    "commander": "^15.0.0",
+    "es-toolkit": "^1.49.0",
     "jsonc-parser": "^3.3.1",
-    "ora": "^9.3.0",
-    "rolldown": "1.0.0-rc.6",
-    "zod": "^4.3.6"
+    "ora": "^9.4.1",
+    "rolldown": "1.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.5",
-    "@types/estree": "^1.0.8",
+    "@types/estree": "^1.0.9",
     "@types/express": "^5.0.6",
-    "@types/node": "^25.3.3",
-    "@typescript/native-preview": "7.0.0-dev.20260302.1",
-    "@vitest/coverage-v8": "^4.0.18",
-    "bun-types": "^1.3.10",
+    "@types/node": "^26.1.1",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "@vitest/coverage-v8": "^4.1.10",
+    "bun-types": "^1.3.14",
     "cross-env": "^10.1.0",
     "express": "^5.2.1",
-    "oxlint": "^1.51.0",
-    "oxlint-tsgolint": "^0.15.0",
+    "oxfmt": "^0.59.0",
+    "oxlint": "^1.74.0",
+    "oxlint-tsgolint": "^0.25.0",
     "rimraf": "^6.1.3",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
-  },
-  "engines": {
-    "node": ">=20.11.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/steipete/mcporter"
-  },
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "cli",
-    "sweetistics"
-  ],
-  "author": "Sweetistics",
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
+    "tsx": "^4.23.1",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vite": "8.1.4",
+    "vitest": "^4.1.10"
   },
   "devEngines": {
     "runtime": [
       {
         "name": "node",
-        "version": ">=20"
+        "version": ">=24"
       }
     ]
-  }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@10.33.2"
 }

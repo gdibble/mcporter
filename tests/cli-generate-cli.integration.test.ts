@@ -25,23 +25,57 @@ function pnpmArgs(args: string[]): string[] {
 }
 
 async function ensureDistBuilt(): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    execFile(PNPM_COMMAND, pnpmArgs(['build']), { cwd: process.cwd(), env: process.env }, (error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
-  });
+  try {
+    await fs.access(CLI_ENTRY);
+  } catch {
+    throw new Error('dist/cli.js is missing; run `pnpm build` before invoking this integration test directly.');
+  }
 }
 
 async function hasBun(): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
-    execFile('bun', ['--version'], { cwd: process.cwd(), env: process.env }, (error) => {
+    execFile(process.env.BUN_BIN ?? 'bun', ['--version'], { cwd: process.cwd(), env: process.env }, (error) => {
       resolve(!error);
     });
   });
+}
+
+let bunCompileSupport: Promise<boolean> | undefined;
+
+async function hasRunnableBunCompile(): Promise<boolean> {
+  bunCompileSupport ??= probeRunnableBunCompile();
+  return await bunCompileSupport;
+}
+
+async function probeRunnableBunCompile(): Promise<boolean> {
+  if (!(await hasBun())) {
+    return false;
+  }
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-bun-compile-probe-'));
+  const sourcePath = path.join(tempDir, 'probe.ts');
+  const binaryPath = path.join(tempDir, 'probe');
+  try {
+    await fs.writeFile(sourcePath, 'console.log("mcporter-bun-compile-probe");\n', 'utf8');
+    const bun = process.env.BUN_BIN ?? 'bun';
+    const built = await new Promise<boolean>((resolve) => {
+      execFile(
+        bun,
+        ['build', sourcePath, '--compile', '--outfile', binaryPath],
+        { cwd: tempDir, env: process.env },
+        (error) => resolve(!error)
+      );
+    });
+    if (!built) {
+      return false;
+    }
+    return await new Promise<boolean>((resolve) => {
+      execFile(binaryPath, [], { cwd: tempDir, env: process.env }, (error, stdout) => {
+        resolve(!error && stdout.trim() === 'mcporter-bun-compile-probe');
+      });
+    });
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function ensureBunSupport(reason: string): Promise<boolean> {
@@ -54,6 +88,43 @@ async function ensureBunSupport(reason: string): Promise<boolean> {
     return false;
   }
   return true;
+}
+
+async function ensureRunnableBunCompile(reason: string): Promise<boolean> {
+  if (!(await ensureBunSupport(reason))) {
+    return false;
+  }
+  if (!(await hasRunnableBunCompile())) {
+    console.warn(`bun-compiled binaries cannot run on this runner; skipping ${reason}.`);
+    return false;
+  }
+  return true;
+}
+
+async function runGeneratedCli(
+  bundlePath: string,
+  args: string[],
+  env: NodeJS.ProcessEnv
+): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(process.execPath, [bundlePath, ...args], { env }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`${error.message}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function parseGeneratedDaemonJson(result: { stdout: string }): { instanceId: string; count: number } {
+  const trimmed = result.stdout.trim();
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`Unable to find JSON payload in generated CLI output:\n${result.stdout}`);
+  }
+  return JSON.parse(trimmed.slice(start, end + 1)) as { instanceId: string; count: number };
 }
 
 describe('mcporter CLI integration', () => {
@@ -89,6 +160,17 @@ describe('mcporter CLI integration', () => {
       async () => ({
         content: [{ type: 'text', text: JSON.stringify({ ok: true }) }],
         structuredContent: { ok: true },
+      })
+    );
+    server.registerTool(
+      'plain_text',
+      {
+        title: 'Plain Text',
+        description: 'Returns non-JSON text',
+        inputSchema: { value: z.string().optional() },
+      },
+      async ({ value }) => ({
+        content: [{ type: 'text', text: value ?? 'plain' }],
       })
     );
 
@@ -166,8 +248,112 @@ describe('mcporter CLI integration', () => {
     });
     expect(helpOutput.stdout).toMatch(/Usage: .+ <command> \[options]/);
     expect(helpOutput.stdout).toContain('Context7 integration harness');
+
+    const plainOutput = await runGeneratedCli(bundlePath, ['plain-text', '--value', 'hello', '--output', 'json'], {
+      ...process.env,
+      MCPORTER_NO_FORCE_EXIT: '1',
+    });
+    const plainJson = JSON.parse(plainOutput.stdout) as { content?: Array<{ text?: string }> };
+    expect(plainJson.content?.[0]?.text).toBe('hello');
+
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   });
+
+  it('routes generated keep-alive stdio CLIs through the daemon', async () => {
+    if (process.platform === 'win32') {
+      console.warn('daemon sockets use Unix paths in this integration; skipping on Windows.');
+      return;
+    }
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-daemon-'));
+    const stateDir = await fs.mkdtemp('/tmp/mcporter-generated-daemon-');
+    const serverPath = path.join(tempDir, 'daemon-server.mjs');
+    const bundlePath = path.join(tempDir, 'daemon-cli.js');
+    const daemonDir = path.join(stateDir, 'daemon-state');
+    const generatedConfigDir = path.join(stateDir, 'generated-configs');
+    const cliEnv = {
+      ...process.env,
+      MCPORTER_NO_FORCE_EXIT: '1',
+      MCPORTER_DAEMON_DIR: daemonDir,
+      MCPORTER_GENERATED_CONFIG_DIR: generatedConfigDir,
+    };
+    await fs.writeFile(
+      serverPath,
+      `import { randomUUID } from 'node:crypto';
+import { McpServer } from '${MCP_SERVER_MODULE}';
+import { StdioServerTransport } from '${STDIO_SERVER_MODULE}';
+import { z } from '${ZOD_MODULE}';
+
+const instanceId = randomUUID();
+let counter = 0;
+const server = new McpServer({ name: 'generated-daemon', version: '1.0.0' });
+server.registerTool('next_value', {
+  title: 'Next value',
+  description: 'Return process-local state',
+  inputSchema: {},
+  outputSchema: { instanceId: z.string(), count: z.number() },
+}, async () => {
+  counter += 1;
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ instanceId, count: counter }) }],
+    structuredContent: { instanceId, count: counter },
+  };
+});
+const transport = new StdioServerTransport();
+await server.connect(transport);
+await new Promise((resolve) => { transport.onclose = resolve; });
+`,
+      'utf8'
+    );
+    const inlineServer = JSON.stringify({
+      name: 'generated-daemon',
+      description: 'Generated daemon test server',
+      command: 'node',
+      args: [serverPath],
+      lifecycle: 'keep-alive',
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          process.execPath,
+          [CLI_ENTRY, 'generate-cli', '--server', inlineServer, '--bundle', bundlePath, '--runtime', 'node'],
+          { cwd: tempDir, env: cliEnv },
+          (error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          }
+        );
+      });
+
+      const first = parseGeneratedDaemonJson(
+        await runGeneratedCli(bundlePath, ['next-value', '--output', 'json'], cliEnv)
+      );
+      const second = parseGeneratedDaemonJson(
+        await runGeneratedCli(bundlePath, ['next-value', '--output', 'json'], cliEnv)
+      );
+      expect(first.count).toBe(1);
+      expect(second.count).toBe(2);
+      expect(second.instanceId).toBe(first.instanceId);
+    } finally {
+      const configFiles = await fs.readdir(generatedConfigDir).catch(() => []);
+      await Promise.all(
+        configFiles
+          .filter((entry) => entry.endsWith('.json'))
+          .map((entry) =>
+            runGeneratedCli(
+              bundlePath,
+              ['--config', path.join(generatedConfigDir, entry), 'daemon', 'stop'],
+              cliEnv
+            ).catch(() => '')
+          )
+      );
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(stateDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, 40_000);
 
   it('filters generated CLI tools via --include-tools/--exclude-tools', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-filter-'));
@@ -429,7 +615,7 @@ describe('mcporter CLI integration', () => {
   }, 20000);
 
   it('runs "node dist/cli.js generate-cli --compile" when bun is available', async () => {
-    if (!(await ensureBunSupport('compile integration test'))) {
+    if (!(await ensureRunnableBunCompile('compile integration test'))) {
       return;
     }
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-compile-'));
@@ -479,7 +665,7 @@ describe('mcporter CLI integration', () => {
   }, 20000);
 
   it('end-to-end: compiles a "bun" CLI and calls ping', async () => {
-    if (!(await ensureBunSupport('Bun CLI end-to-end test'))) {
+    if (!(await ensureRunnableBunCompile('Bun CLI end-to-end test'))) {
       return;
     }
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-bun-'));
@@ -553,7 +739,7 @@ describe('mcporter CLI integration', () => {
   }, 30000);
 
   it('runs "node dist/cli.js generate-cli --compile" using the Bun bundler by default', async () => {
-    if (!(await ensureBunSupport('Bun bundler compile integration test'))) {
+    if (!(await ensureRunnableBunCompile('Bun bundler compile integration test'))) {
       return;
     }
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-compile-bun-'));
@@ -602,7 +788,7 @@ describe('mcporter CLI integration', () => {
   }, 20000);
 
   it('accepts inline stdio commands (e.g., "npx -y chrome-devtools-mcp@latest") when compiling', async () => {
-    if (!(await ensureBunSupport('inline stdio compile integration test'))) {
+    if (!(await ensureRunnableBunCompile('inline stdio compile integration test'))) {
       return;
     }
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-inline-stdio-'));
@@ -659,6 +845,148 @@ await new Promise((resolve) => {
     expect(stats.isFile()).toBe(true);
 
     const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(binaryPath, [], { env: process.env }, (error, childStdout, childStderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ stdout: childStdout, stderr: childStderr });
+      });
+    });
+    expect(stdout).toContain('echo - Return the provided text');
+    expect(stdout).toContain('[--raw <json>]');
+
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }, 40_000);
+
+  it('resolves relative stdio args from the bundle directory when invoked from any cwd (#56)', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-reloc-'));
+    const distDir = path.join(tempDir, 'dist');
+    await fs.mkdir(distDir, { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, 'package.json'),
+      JSON.stringify({ name: 'mcporter-reloc-e2e', version: '0.0.0' }, null, 2),
+      'utf8'
+    );
+
+    const serverPath = path.join(distDir, 'server.mjs');
+    const serverSource = `import { McpServer } from '${MCP_SERVER_MODULE}';
+import { StdioServerTransport } from '${STDIO_SERVER_MODULE}';
+import { z } from '${ZOD_MODULE}';
+
+const server = new McpServer({ name: 'reloc', version: '1.0.0' });
+server.registerTool('echo', {
+  title: 'Echo',
+  description: 'Return the provided text',
+  inputSchema: z.object({ text: z.string() }),
+  outputSchema: z.object({ text: z.string() }),
+}, async ({ text }) => ({
+  content: [{ type: 'text', text }],
+  structuredContent: { text },
+}));
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
+await new Promise((resolve) => { transport.onclose = resolve; });
+`;
+    await fs.writeFile(serverPath, serverSource, 'utf8');
+
+    const bundlePath = path.join(distDir, 'reloc-cli.cjs');
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [CLI_ENTRY, 'generate-cli', '--command', 'node dist/server.mjs', '--bundle', bundlePath, '--runtime', 'node'],
+        { cwd: tempDir, env: { ...process.env, MCPORTER_NO_FORCE_EXIT: '1' } },
+        (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        }
+      );
+    });
+
+    const callerCwd = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-cli-reloc-caller-'));
+    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [bundlePath, 'echo', '--text', 'relocated'],
+        { cwd: callerCwd, env: process.env },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout, stderr });
+        }
+      );
+    });
+    expect(result.stdout).toContain('relocated');
+
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(callerCwd, { recursive: true, force: true }).catch(() => {});
+  }, 30_000);
+
+  it('compiles a generated CLI from the standalone Bun release binary in an empty directory', async () => {
+    if (process.env.MCPORTER_STANDALONE_BINARY_TEST !== '1') {
+      console.warn('set MCPORTER_STANDALONE_BINARY_TEST=1 to run standalone Bun release binary smoke');
+      return;
+    }
+    if (!(await ensureRunnableBunCompile('standalone Bun release binary smoke'))) {
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      execFile(PNPM_COMMAND, pnpmArgs(['build:bun']), { cwd: process.cwd(), env: process.env }, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-standalone-bun-'));
+    const binaryPath = path.join(tempDir, 'context7-cli');
+    const mcporterBinary = path.join(process.cwd(), 'dist-bun', 'mcporter');
+    const packedTarball = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'npm',
+        ['pack', '--ignore-scripts', '--pack-destination', tempDir],
+        { cwd: process.cwd(), env: process.env },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(`${error.message}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
+            return;
+          }
+          resolve(path.join(tempDir, stdout.trim().split('\n').at(-1) ?? ''));
+        }
+      );
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        mcporterBinary,
+        ['generate-cli', '--command', baseUrl.toString(), '--compile', binaryPath],
+        {
+          cwd: tempDir,
+          env: {
+            ...process.env,
+            MCPORTER_BUNDLER_DEP_PACKAGE: packedTarball,
+            MCPORTER_NO_FORCE_EXIT: '1',
+          },
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(`${error.message}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
+            return;
+          }
+          resolve();
+        }
+      );
+    });
+
+    const helpOutput = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
       execFile(binaryPath, [], { env: process.env }, (error, stdout, stderr) => {
         if (error) {
           reject(error);
@@ -667,9 +995,9 @@ await new Promise((resolve) => {
         resolve({ stdout, stderr });
       });
     });
-    expect(stdout).toContain('echo - Return the provided text');
-    expect(stdout).toContain('[--raw <json>]');
+    expect(helpOutput.stdout).toMatch(/Usage: .+ <command> \[options]/);
+    expect(helpOutput.stdout).toContain('ping - Simple health check');
 
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-  }, 40_000);
+  }, 90_000);
 });

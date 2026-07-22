@@ -1,5 +1,6 @@
 export const CALL_HELP_ARGUMENT_LINES = [
   '  key=value / key:value  Flag-style named arguments.',
+  '  key=@path              Read a UTF-8 string value from a file; use @@ for a literal @.',
   '  function-call syntax   \'server.tool(arg: "value", other: 1)\'.',
   '  --args <json>          Provide a JSON object payload.',
   '  positional values      Accepted when schema order is known.',
@@ -10,6 +11,7 @@ export const CALL_HELP_RUNTIME_FLAG_LINES = [
   '  --timeout <ms>         Override the call timeout.',
   '  --output text|markdown|json|raw  Control formatting.',
   '  --save-images <dir>    Save image content blocks to a directory.',
+  '  --no-oauth             Never start OAuth; use cached tokens only.',
   '  --raw-strings          Keep numeric-looking argument values as strings.',
   '  --no-coerce            Keep all key/value and positional arguments as raw strings.',
   '  --tail-log             Stream returned log handles.',
@@ -18,6 +20,7 @@ export const CALL_HELP_RUNTIME_FLAG_LINES = [
 export const CALL_HELP_ADHOC_SERVER_LINES = [
   '  --http-url <url>       Register an HTTP server for this run.',
   '  --allow-http           Permit plain http:// URLs with --http-url.',
+  '  --header KEY=value     Attach HTTP headers (repeatable).',
   '  --stdio <command>      Run a stdio MCP server (repeat --stdio-arg for args).',
   '  --stdio-arg <value>    Append args to the stdio command (repeatable).',
   '  --env KEY=value        Inject env vars for stdio servers (repeatable).',
@@ -30,6 +33,7 @@ export const CALL_HELP_ADHOC_SERVER_LINES = [
 
 export const CALL_HELP_EXAMPLE_LINES = [
   '  mcporter call linear.list_issues team=ENG limit:5',
+  '  mcporter call linear.create_comment body=@comment.md',
   '  mcporter call "linear.create_issue(title: \\"Bug\\", team: \\"ENG\\")"',
   '  mcporter call https://api.example.com/mcp.fetch url:https://example.com',
   '  mcporter call --stdio "bun run ./server.ts" scrape url=https://example.com',

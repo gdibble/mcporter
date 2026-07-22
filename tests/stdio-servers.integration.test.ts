@@ -7,26 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const CLI_ENTRY = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
-const PNPM_COMMAND = process.platform === 'win32' ? 'cmd.exe' : 'pnpm';
-const PNPM_ARGS_PREFIX = process.platform === 'win32' ? ['/d', '/s', '/c', 'pnpm'] : [];
-
-function pnpmArgs(args: string[]): string[] {
-  return [...PNPM_ARGS_PREFIX, ...args];
-}
 
 async function ensureDistBuilt(): Promise<void> {
   try {
     await fs.access(CLI_ENTRY);
   } catch {
-    await new Promise<void>((resolve, reject) => {
-      execFile(PNPM_COMMAND, pnpmArgs(['build']), { cwd: process.cwd(), env: process.env }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    throw new Error('dist/cli.js is missing; run `pnpm build` before invoking this integration test directly.');
   }
 }
 
@@ -128,6 +114,22 @@ describe('stdio MCP servers (filesystem + memory)', () => {
       );
       expect(callResult.stderr).toBe('');
       expect(callResult.stdout).not.toContain('Error');
+    },
+    20000
+  );
+
+  memoryTest(
+    'passes multiline @path argument values unchanged to a stdio MCP server',
+    async () => {
+      const payloadPath = path.join(tempDir, 'multiline.txt');
+      const payload = 'first line\nsecond line\n';
+      await fs.writeFile(payloadPath, payload, 'utf8');
+      const callResult = await runCli(
+        ['call', 'memory-test.echo_text', '--output', 'json', `text=@${payloadPath}`],
+        configPath
+      );
+      expect(callResult.stderr).toBe('');
+      expect(JSON.parse(callResult.stdout)).toMatchObject({ text: payload });
     },
     20000
   );

@@ -8,11 +8,11 @@ read_when:
 
 `mcporter call` now understands two complementary styles:
 
-| Style | Example | Notes |
-|-------|---------|-------|
-| Flag-based (compatible) | `mcporter call linear.create_comment --issue-id LNR-123 --body "Hi"` | Use `key=value`, `key:value`, or `key: value` pairs—ideal for shell scripts. |
-| Function-call (expressive) | `mcporter call 'linear.create_comment(issueId: "LNR-123", body: "Hi")'` | Mirrors the pseudo-TypeScript signature shown by `mcporter list`; unlabeled values map to schema order. |
-| Structured output | `mcporter call 'linear.create_comment(...)' --output json` | Successful calls emit JSON bodies; failures emit `{ server, tool, issue }` envelopes so automation can react to auth/offline/http errors. |
+| Style                      | Example                                                                 | Notes                                                                                                                                     |
+| -------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Flag-based (compatible)    | `mcporter call linear.create_comment --issue-id LNR-123 --body "Hi"`    | Use `--key value`, `--key=value`, `key=value`, `key:value`, or `key: value` pairs—ideal for shell scripts.                                |
+| Function-call (expressive) | `mcporter call 'linear.create_comment(issueId: "LNR-123", body: "Hi")'` | Mirrors the pseudo-TypeScript signature shown by `mcporter list`; unlabeled values map to schema order.                                   |
+| Structured output          | `mcporter call 'linear.create_comment(...)' --output json`              | Successful calls emit JSON bodies; failures emit `{ server, tool, issue }` envelopes so automation can react to auth/offline/http errors. |
 
 Both forms share the same validation pipeline, so required parameters, enums, and formats behave identically.
 
@@ -40,11 +40,12 @@ Key details:
 - Run `mcporter list <server> --all-parameters` whenever you want the full signature; the footer repeats `Optional parameters hidden; run with --all-parameters to view all fields.` any time truncation occurs.
 - Return types come from each tool’s output schema, so you’ll see concrete names when providers include `title` metadata (e.g. `DocumentConnection`). When no schema is advertised we omit the `: Type` suffix entirely instead of showing `unknown`.
 - Each server concludes with a short `Examples:` block that mirrors the preferred function-call syntax.
+- Run `mcporter list <server> --brief` (or `--signatures`) when you only want the compact signatures and optional summaries without doc blocks or examples.
 
 ## Function-Call Syntax Details
 
 - **Named arguments preferred**: `issueId: "123"` keeps calls self-documenting. When labels are omitted, mcporter falls back to positional order defined by the tool schema.
-- **Optional positional fallback**: omit labels when calling `mcporter 'context7.resolve-library-id("react")'`—arguments map to the schema order after any explicitly named parameters.
+- **Optional positional fallback**: omit labels when calling `mcporter 'context7.resolve-library-id("React hooks docs", "react")'`—arguments map to the schema order after any explicitly named parameters.
 - **Literals supported**: strings, numbers, booleans, `null`, arrays, and nested objects. For strings containing spaces or commas, wrap the entire call in single quotes to keep the shell happy.
 - **Error feedback**: invalid keys, unsupported expressions, or parser failures bubble up with actionable messages (`Unsupported argument expression: Identifier`, `Unable to parse call expression: …`).
 - **Server selection**: You can embed the server in the expression (`linear.create_comment(...)`) or pass it separately (`--server linear create_comment(...)`).
@@ -60,17 +61,21 @@ Key details:
 
 ## Tips
 
-- Use `--args '{ "issueId": "LNR-123" }'` if you already have JSON payloads—nothing changed for that workflow.
+- Use `--args '{ "issueId": "LNR-123" }'`, `--json '{ "issueId": "LNR-123" }'`, or `--json -` if you already have JSON payloads.
 - The new syntax respects all existing features (timeouts, `--output`, auto-correction).
 - Required fields show by default; pass `--all-parameters` when you want the full parameter list (or `--schema` for raw JSON schemas).
 - When in doubt, run `mcporter list <server>` to see the current signature and sample invocation.
 
 ## Flag-Based Syntax Details
 
-- `key=value`, `key:value`, and `key: value` all map to the same named-argument handling, so you can type whichever feels most natural for your shell.
+- `--key value`, `--key=value`, `key=value`, `key:value`, `key: value`, and `key:=value` all map to the same named-argument handling, so you can type whichever feels most natural for your shell. Long flag keys convert kebab-case to camelCase (`--save-to-drafts true` becomes `saveToDrafts: true`). The `:=` form is accepted as a compatibility alias for `=`.
 - By default, arguments keep the same validation pipeline as the function-call syntax—enums, numbers, and booleans are coerced automatically, and missing required fields raise errors.
+- `--args -` and `--json -` read a JSON object from stdin.
+- Named flag-style values can read exact UTF-8 text from a file with `key=@path` or `--key @path`. Paths resolve from the current working directory, file contents remain strings without coercion, and `key=@@literal` produces the literal value `@literal`. Function-call strings such as `body: "@literal"` remain literal.
+- Bare string values supplied via long flags wrap into one-item arrays when the tool schema declares that field as an array.
+- Numeric-looking `key=value` arguments are restored to their original string spelling when the tool schema declares that parameter as a string, which keeps timestamp-like IDs such as Slack `thread_ts=1234567890.123456` intact.
 - `--raw-strings` disables numeric coercion for flag-style and positional values so IDs/codes stay literal strings (`code=12345` stays `"12345"`).
 - `--no-coerce` disables all coercion for flag-style and positional values (`true`, `null`, and JSON-like values remain strings).
-- Unknown long flags like `--source` now fail fast instead of silently becoming positional tool arguments. Use `source=value`, `--args '{"source":"value"}'`, or insert `--` before literal positional values that start with `--`.
+- Long flags without values fail fast. Insert `--` before literal positional values that start with `--`.
 - `--save-images <dir>` keeps stdout formatting untouched while writing image content blocks to disk when a tool response includes `type: "image"` entries.
 - `tool=value`/`tool:value` and `server=value` still act as aliases for `--tool` / `--server` when you need to override the selector.

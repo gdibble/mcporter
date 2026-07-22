@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseGenerateFlags } from '../src/cli/generate/flags.js';
 import { inferNameFromCommand } from '../src/cli/generate/name-utils.js';
+import { normalizeDefinition } from '../src/cli/generate/definition.js';
 import { buildGenerateCliCommand } from '../src/cli/generate/template-data.js';
+import { printGenerateCliHelp } from '../src/cli/generate-cli-runner.js';
+import { serializeDefinition } from '../src/cli-metadata.js';
 import type { SerializedServerDefinition } from '../src/cli-metadata.js';
 
 describe('generate-cli runner internals', () => {
@@ -21,6 +24,19 @@ describe('generate-cli runner internals', () => {
     expect(parsed.bundle).toBe(true);
     expect(parsed.compile).toBe(true);
     expect(parsed.minify).toBe(true);
+  });
+
+  it('documents timeout and minify flags in generate-cli help', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let output = '';
+    try {
+      printGenerateCliHelp();
+      output = String(spy.mock.calls[0]?.[0] ?? '');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(output).toContain('--timeout <ms>');
+    expect(output).toContain('--minify / --no-minify');
   });
 
   it('normalizes inferred names from URLs', () => {
@@ -78,6 +94,37 @@ describe('generate-cli runner internals', () => {
     expect((parsed.command as string).startsWith('https://')).toBe(true);
     const inferred = parsed.command !== undefined ? inferNameFromCommand(parsed.command) : undefined;
     expect(inferred).toBe('shadcn');
+  });
+
+  it('preserves HTTP fetch compatibility metadata in generated CLI definitions', () => {
+    const definition = normalizeDefinition({
+      name: 'sunsama',
+      command: 'https://api.sunsama.com/mcp',
+      httpFetch: 'node-http1',
+    });
+
+    expect(definition.httpFetch).toBe('node-http1');
+    expect(serializeDefinition(definition).httpFetch).toBe('node-http1');
+  });
+
+  it('preserves refreshable bearer metadata in generated CLI definitions', () => {
+    const definition = normalizeDefinition({
+      name: 'stdio-refresh',
+      command: 'node',
+      args: ['server.js'],
+      auth: 'refreshable_bearer',
+      refresh: {
+        token_endpoint: 'https://auth.example.com/token',
+        access_token_env: 'EXAMPLE_ACCESS_TOKEN',
+      },
+    });
+
+    expect(definition.auth).toBe('refreshable_bearer');
+    expect(definition.refresh).toEqual({
+      tokenEndpoint: 'https://auth.example.com/token',
+      accessTokenEnv: 'EXAMPLE_ACCESS_TOKEN',
+    });
+    expect(serializeDefinition(definition).refresh).toEqual(definition.refresh);
   });
 
   it('wraps single-token stdio commands when passed via --command', () => {

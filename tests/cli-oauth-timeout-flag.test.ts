@@ -24,6 +24,7 @@ describe('mcporter --oauth-timeout flag', () => {
       listTools: listToolsSpy,
       callTool: vi.fn(),
       listResources: vi.fn(),
+      readResource: vi.fn(),
       connect: vi.fn(),
       close: vi.fn(async () => {}),
     };
@@ -51,6 +52,13 @@ describe('mcporter --oauth-timeout flag', () => {
     createRuntimeSpy.mockRestore();
   });
 
+  it('rejects malformed --oauth-timeout values', async () => {
+    const { runCli } = await import('../src/cli.js');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(runCli(['--oauth-timeout', '5000abc', 'list'])).rejects.toThrow(/process\.exit/);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('positive integer'));
+  });
+
   it('returns once runtime.listTools surfaces an OAuth timeout error', async () => {
     const definition = {
       name: 'fake',
@@ -71,6 +79,7 @@ describe('mcporter --oauth-timeout flag', () => {
       listTools: failingListTools,
       callTool: vi.fn(),
       listResources: vi.fn(),
+      readResource: vi.fn(),
       connect: vi.fn(),
       close: closeSpy,
     };

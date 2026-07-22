@@ -5,6 +5,7 @@ import {
   buildAuthCommandHint,
   buildJsonListEntry,
   createEmptyStatusCounts,
+  printBriefTool,
   printSingleServerHeader,
   printToolDetail,
 } from '../src/cli/list-output.js';
@@ -51,6 +52,35 @@ describe('list output helpers', () => {
     const detail = printToolDetail(definition, metadata, true, true);
     expect(detail.optionalOmitted).toBe(true);
     expect(detail.examples.length).toBeGreaterThan(0);
+    logSpy.mockRestore();
+  });
+
+  it('prints brief tool signatures without examples or doc comments', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const tool: ServerToolInfo = {
+      name: 'add',
+      description: 'Add numbers',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          a: { type: 'number', description: 'First operand' },
+          b: { type: 'number', description: 'Second operand' },
+          format: { type: 'string', enum: ['json', 'markdown'], description: 'Format' },
+          projectId: { type: 'string', description: 'Project context' },
+          initiativeId: { type: 'string', description: 'Initiative context' },
+          creatorId: { type: 'string', description: 'Creator filter' },
+        },
+        required: ['a', 'b'],
+      },
+      outputSchema: { type: 'number' },
+    };
+    const metadata = buildToolMetadata(tool);
+    const detail = printBriefTool(definition, metadata, true);
+    const lines = logSpy.mock.calls.map((call) => call.join(' '));
+    expect(lines.some((line) => line.includes('function add('))).toBe(true);
+    expect(lines.some((line) => line.includes('@param a'))).toBe(false);
+    expect(lines.some((line) => line.includes('Examples:'))).toBe(false);
+    expect(detail.optionalOmitted).toBe(true);
     logSpy.mockRestore();
   });
 
@@ -105,6 +135,17 @@ describe('list output helpers', () => {
     const entry = buildJsonListEntry(summary, 5, { includeSchemas: false });
     expect(entry.status).toBe('auth');
     expect(entry.authCommand).toBe(buildAuthCommandHint(definition));
+  });
+
+  it('shell-quotes auth hints for stdio commands', () => {
+    const hint = buildAuthCommandHint({
+      name: 'unsafe',
+      command: { kind: 'stdio', command: 'node', args: ['server.js', '--name', "$(touch bad)'"], cwd: process.cwd() },
+      auth: 'oauth',
+      source: { kind: 'local', path: '<adhoc>' },
+    });
+    expect(hint).toContain('mcporter auth --stdio node server.js --name ');
+    expect(hint).toContain("'$(touch bad)'\\'''");
   });
 
   it('exposes source list in JSON only when includeSources is true', () => {

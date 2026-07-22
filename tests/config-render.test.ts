@@ -16,8 +16,18 @@ describe('config render helpers', () => {
       auth: 'oauth',
       tokenCacheDir: '/tmp/cache',
       clientName: 'mcporter',
+      oauthClientId: 'client-123',
+      oauthClientSecret: 'do-not-render',
+      oauthClientSecretEnv: 'OAUTH_SECRET',
+      oauthTokenEndpointAuthMethod: 'client_secret_post',
       oauthRedirectUrl: 'https://example.com/callback',
       oauthScope: 'openid profile',
+      refresh: {
+        tokenEndpoint: 'https://auth.example.com/token',
+        accessTokenEnv: 'EXAMPLE_ACCESS_TOKEN',
+      },
+      httpFetch: 'node-http1',
+      allowedTools: ['read'],
       env: { FOO: 'bar' },
     };
 
@@ -30,11 +40,21 @@ describe('config render helpers', () => {
       auth: 'oauth',
       tokenCacheDir: '/tmp/cache',
       clientName: 'mcporter',
+      oauthClientId: 'client-123',
+      oauthClientSecretEnv: 'OAUTH_SECRET',
+      oauthTokenEndpointAuthMethod: 'client_secret_post',
       oauthRedirectUrl: 'https://example.com/callback',
       oauthScope: 'openid profile',
+      refresh: {
+        tokenEndpoint: 'https://auth.example.com/token',
+        accessTokenEnv: 'EXAMPLE_ACCESS_TOKEN',
+      },
+      httpFetch: 'node-http1',
+      allowedTools: ['read'],
       env: { FOO: 'bar' },
       source: { kind: 'import', path: '/tmp/source.json' },
     });
+    expect(payload).not.toHaveProperty('oauthClientSecret');
   });
 
   it('serializes stdio definitions with command metadata', () => {
@@ -46,6 +66,7 @@ describe('config render helpers', () => {
         args: ['--version'],
         cwd: '/tmp',
       },
+      blockedTools: ['write'],
     };
 
     const payload = serializeDefinition(definition);
@@ -56,6 +77,7 @@ describe('config render helpers', () => {
       args: ['--version'],
       cwd: '/tmp',
       name: 'stdio-server',
+      blockedTools: ['write'],
     });
   });
 });

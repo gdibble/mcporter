@@ -10,16 +10,28 @@ describe('mcporter config CLI', () => {
   let tempDir: string;
   let configPath: string;
   let originalXdg: string | undefined;
+  let originalXdgData: string | undefined;
 
   beforeEach(async () => {
     originalXdg = process.env.XDG_CONFIG_HOME;
+    originalXdgData = process.env.XDG_DATA_HOME;
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-config-'));
     configPath = path.join(tempDir, 'config', 'mcporter.json');
+    process.env.XDG_DATA_HOME = path.join(tempDir, 'xdg-data');
   });
 
   afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
-    process.env.XDG_CONFIG_HOME = originalXdg;
+    if (originalXdg === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = originalXdg;
+    }
+    if (originalXdgData === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = originalXdgData;
+    }
     vi.restoreAllMocks();
   });
 
@@ -148,6 +160,12 @@ describe('mcporter config CLI', () => {
     expect(invokeAuth).toHaveBeenCalledWith(['linear']);
   });
 
+  it('delegates login browser-suppression flags to the auth handler', async () => {
+    const invokeAuth = vi.fn().mockResolvedValue(undefined);
+    await handleConfigCli(buildOptions({ configPath }, { invokeAuth }), ['login', 'linear', '--no-browser']);
+    expect(invokeAuth).toHaveBeenCalledWith(['linear', '--no-browser']);
+  });
+
   it('clears cached credentials on logout', async () => {
     const tokenDir = path.join(tempDir, 'token-cache');
     await fs.mkdir(path.dirname(configPath), { recursive: true });
@@ -217,6 +235,18 @@ describe('mcporter config CLI', () => {
     const output = logs.join('\n');
     expect(output).toContain('mcporter config list');
     expect(output).toContain('--source <local|import>');
+  });
+
+  it('prints browser-suppression flags in config login help', async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation(captureLog(logs));
+    await handleConfigCli(buildOptions({ configPath }), ['help', 'login']);
+    spy.mockRestore();
+    const output = logs.join('\n');
+    expect(output).toContain('mcporter config login');
+    expect(output).toContain('--no-browser');
+    expect(output).toContain('--browser none');
+    expect(output).toContain('MCPORTER_OAUTH_NO_BROWSER');
   });
 
   it('warns when requesting help for unknown subcommands', async () => {

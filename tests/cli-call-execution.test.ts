@@ -41,6 +41,204 @@ describe('CLI call execution behavior', () => {
     logSpy.mockRestore();
   });
 
+  it('restores numeric-looking key=value args to schema-declared strings', async () => {
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, listTools } = createRuntimeStub({
+      slack: [
+        {
+          name: 'conversations_replies',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              channel_id: { type: 'string' },
+              thread_ts: { type: 'string' },
+              latest: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+              limit: { type: 'number' },
+            },
+            required: ['channel_id', 'thread_ts'],
+          },
+        },
+      ],
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, [
+      'slack.conversations_replies',
+      'channel_id=C1234567890',
+      'thread_ts=1234567890.123456',
+      'latest=1234567899.987654',
+      'limit=1',
+    ]);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'slack',
+      'conversations_replies',
+      expect.objectContaining({
+        args: {
+          channel_id: 'C1234567890',
+          thread_ts: '1234567890.123456',
+          latest: '1234567899.987654',
+          limit: 1,
+        },
+      })
+    );
+    expect(listTools).toHaveBeenCalledWith('slack', {
+      autoAuthorize: true,
+      includeSchema: true,
+      allowCachedAuth: true,
+      disableOAuth: undefined,
+    });
+    logSpy.mockRestore();
+  });
+
+  it('wraps bare long-flag strings when the schema declares an array', async () => {
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, listTools } = createRuntimeStub({
+      email: [
+        {
+          name: 'send_email',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              to: { type: 'array', items: { type: 'string' } },
+              subject: { type: 'string' },
+            },
+            required: ['to', 'subject'],
+          },
+        },
+      ],
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['email.send_email', '--to', 'miguel@example.com', '--subject', 'Test']);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'email',
+      'send_email',
+      expect.objectContaining({
+        args: {
+          to: ['miguel@example.com'],
+          subject: 'Test',
+        },
+      })
+    );
+    expect(listTools).toHaveBeenCalledWith('email', {
+      autoAuthorize: true,
+      includeSchema: true,
+      allowCachedAuth: true,
+      disableOAuth: undefined,
+    });
+    logSpy.mockRestore();
+  });
+
+  it('does not load schemas for numeric values supplied via --args JSON', async () => {
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, listTools } = createRuntimeStub({
+      linear: [
+        {
+          name: 'list_issues',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              limit: { type: 'number' },
+            },
+          },
+        },
+      ],
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['linear.list_issues', '--args', '{"limit":5}']);
+
+    expect(callTool).toHaveBeenCalledWith('linear', 'list_issues', expect.objectContaining({ args: { limit: 5 } }));
+    expect(listTools).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it('marks MCP isError tool results as process failures', async () => {
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const { handleCall } = await cliModulePromise;
+      const { runtime, callTool } = createRuntimeStub({
+        linear: [{ name: 'explode', inputSchema: { type: 'object', properties: {} } }],
+      });
+      callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Unknown resource' }], isError: true });
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await handleCall(runtime, ['linear.explode']);
+
+      expect(process.exitCode).toBe(1);
+      logSpy.mockRestore();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('auto-corrects near-miss tool names returned as MCP isError content', async () => {
+    const { handleCall } = await cliModulePromise;
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Unknown tool: read_wiki_structur' }], isError: true })
+      .mockResolvedValueOnce({ ok: true });
+    const listTools = vi.fn().mockResolvedValue([{ name: 'read_wiki_structure' }]);
+    const runtime = {
+      callTool,
+      listTools,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['deepwiki.read_wiki_structur']);
+
+    const notes = logSpy.mock.calls.map((call) => call.join(' '));
+    expect(notes.some((line) => line.includes('Auto-corrected tool call to deepwiki.read_wiki_structure'))).toBe(true);
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(callTool).toHaveBeenNthCalledWith(
+      1,
+      'deepwiki',
+      'read_wiki_structur',
+      expect.objectContaining({ args: {} })
+    );
+    expect(callTool).toHaveBeenNthCalledWith(
+      2,
+      'deepwiki',
+      'read_wiki_structure',
+      expect.objectContaining({ args: {} })
+    );
+
+    logSpy.mockRestore();
+  });
+
+  it('keeps auto-correct diagnostics off stdout for JSON output', async () => {
+    const { handleCall } = await cliModulePromise;
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Unknown tool: read_wiki_structur' }], isError: true })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const listTools = vi.fn().mockResolvedValue([{ name: 'read_wiki_structure' }]);
+    const runtime = {
+      callTool,
+      listTools,
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await handleCall(runtime, ['deepwiki.read_wiki_structur', '--output', 'json']);
+
+    expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+      'Auto-corrected tool call to deepwiki.read_wiki_structure'
+    );
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(logSpy.mock.calls[0]?.[0]?.toString() ?? '{}')).toEqual({ ok: true });
+
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
   it('still requires an explicit tool when multiple are available', async () => {
     const { handleCall } = await cliModulePromise;
     const { runtime, callTool } = createRuntimeStub(
@@ -94,6 +292,133 @@ describe('CLI call execution behavior', () => {
     logSpy.mockRestore();
   });
 
+  it('calls configured HTTP servers by server.tool selector', async () => {
+    const { handleCall } = await cliModulePromise;
+    const definition: ServerDefinition = {
+      name: 'xhs',
+      command: { kind: 'http', url: new URL('http://127.0.0.1:18060/mcp') },
+      source: { kind: 'local', path: '<test>' },
+    };
+    const { runtime, callTool, registerDefinition } = createRuntimeStub(
+      {
+        xhs: [{ name: 'check_login_status', inputSchema: { type: 'object', properties: {} } }],
+      },
+      { definitions: [definition] }
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['xhs.check_login_status']);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'xhs',
+      'check_login_status',
+      expect.objectContaining({
+        args: {},
+      })
+    );
+    expect(registerDefinition).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it('splits server.tool selectors before calling ad-hoc HTTP servers', async () => {
+    const httpUrl = 'http://127.0.0.1:18060/mcp';
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, registerDefinition } = createRuntimeStub({});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['xhs.check_login_status', '--http-url', httpUrl, '--allow-http']);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'xhs',
+      'check_login_status',
+      expect.objectContaining({
+        args: {},
+      })
+    );
+    expect(registerDefinition).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'xhs' }),
+      expect.objectContaining({ overwrite: true })
+    );
+    logSpy.mockRestore();
+  });
+
+  it('splits server.tool selectors when ad-hoc HTTP servers also use --name', async () => {
+    const httpUrl = 'http://127.0.0.1:18060/mcp';
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, registerDefinition } = createRuntimeStub({});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, ['xhs.check_login_status', '--http-url', httpUrl, '--allow-http', '--name', 'xhs']);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'xhs',
+      'check_login_status',
+      expect.objectContaining({
+        args: {},
+      })
+    );
+    expect(registerDefinition).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'xhs' }),
+      expect.objectContaining({ overwrite: true })
+    );
+    logSpy.mockRestore();
+  });
+
+  it('uses the server prefix as the ad-hoc name when --tool overrides a qualified selector', async () => {
+    const httpUrl = 'http://127.0.0.1:18060/mcp';
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool, registerDefinition } = createRuntimeStub({});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, [
+      'xhs.selector_tool',
+      '--http-url',
+      httpUrl,
+      '--allow-http',
+      '--tool',
+      'check_login_status',
+    ]);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'xhs',
+      'check_login_status',
+      expect.objectContaining({
+        args: {},
+      })
+    );
+    expect(registerDefinition).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'xhs' }),
+      expect.objectContaining({ overwrite: true })
+    );
+    logSpy.mockRestore();
+  });
+
+  it('honors explicit literal dotted tool names for named ad-hoc HTTP servers', async () => {
+    const httpUrl = 'http://127.0.0.1:18060/mcp';
+    const { handleCall } = await cliModulePromise;
+    const { runtime, callTool } = createRuntimeStub({});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleCall(runtime, [
+      '--http-url',
+      httpUrl,
+      '--allow-http',
+      '--name',
+      'xhs',
+      '--tool',
+      'xhs.check_login_status',
+    ]);
+
+    expect(callTool).toHaveBeenCalledWith(
+      'xhs',
+      'xhs.check_login_status',
+      expect.objectContaining({
+        args: {},
+      })
+    );
+    logSpy.mockRestore();
+  });
+
   it('aborts long-running tools when the timeout elapses', async () => {
     vi.useFakeTimers();
     try {
@@ -127,7 +452,7 @@ describe('CLI call execution behavior', () => {
       callTool,
       listTools,
       close: vi.fn().mockResolvedValue(undefined),
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -138,7 +463,12 @@ describe('CLI call execution behavior', () => {
     expect(callTool).toHaveBeenCalledTimes(2);
     expect(callTool).toHaveBeenNthCalledWith(1, 'linear', 'listIssues', expect.objectContaining({ args: {} }));
     expect(callTool).toHaveBeenNthCalledWith(2, 'linear', 'list_issues', expect.objectContaining({ args: {} }));
-    expect(listTools).toHaveBeenCalledWith('linear', { autoAuthorize: true, includeSchema: false });
+    expect(listTools).toHaveBeenCalledWith('linear', {
+      autoAuthorize: true,
+      includeSchema: false,
+      allowCachedAuth: true,
+      disableOAuth: undefined,
+    });
 
     logSpy.mockRestore();
   });
@@ -151,7 +481,7 @@ describe('CLI call execution behavior', () => {
       callTool,
       listTools,
       close: vi.fn().mockResolvedValue(undefined),
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -242,9 +572,10 @@ function createRuntimeStub(
   >,
   options: { definitions?: ServerDefinition[] } = {}
 ): {
-  runtime: Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+  runtime: Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
   callTool: ReturnType<typeof vi.fn>;
   listTools: ReturnType<typeof vi.fn>;
+  registerDefinition: ReturnType<typeof vi.fn>;
 } {
   const definitions = new Map<string, ServerDefinition>();
   for (const entry of options.definitions ?? []) {
@@ -259,6 +590,9 @@ function createRuntimeStub(
     return tools;
   });
   const close = vi.fn().mockResolvedValue(undefined);
+  const registerDefinition = vi.fn().mockImplementation((definition: ServerDefinition) => {
+    definitions.set(definition.name, definition);
+  });
   const runtime = {
     getDefinitions: () => [...definitions.values()],
     getDefinition: vi.fn().mockImplementation((name: string) => {
@@ -268,12 +602,10 @@ function createRuntimeStub(
       }
       return definition;
     }),
-    registerDefinition: vi.fn().mockImplementation((definition: ServerDefinition) => {
-      definitions.set(definition.name, definition);
-    }),
+    registerDefinition,
     listTools,
     callTool,
     close,
-  } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
-  return { runtime, callTool, listTools };
+  } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+  return { runtime, callTool, listTools, registerDefinition };
 }

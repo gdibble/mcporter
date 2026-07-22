@@ -49,6 +49,27 @@ export async function evictIdleServers(
   );
 }
 
+export function shouldShutdownDaemonForIdle(
+  lastActivityAt: number,
+  now: number,
+  idleTimeoutMs: number | undefined,
+  activeRequests = 0
+): boolean {
+  return (
+    activeRequests <= 0 &&
+    typeof idleTimeoutMs === 'number' &&
+    idleTimeoutMs > 0 &&
+    now - lastActivityAt >= idleTimeoutMs
+  );
+}
+
+export function daemonIdleWatcherInterval(idleTimeoutMs: number | undefined): number {
+  if (!idleTimeoutMs) {
+    return 30_000;
+  }
+  return Math.min(30_000, Math.max(100, Math.floor(idleTimeoutMs / 2)));
+}
+
 export function buildErrorResponse(id: string, code: string, error?: unknown): DaemonResponse {
   let message = code;
   if (error instanceof Error) {

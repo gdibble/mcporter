@@ -26,18 +26,18 @@ npm install mcporter
 
 ## 3. OAuth Tokens
 
-- Tokens are saved under `~/.mcporter/<server>/` by default.
+- Tokens are saved in the shared vault under `~/.mcporter/credentials.json` by default, or `$XDG_DATA_HOME/mcporter/credentials.json` when `XDG_DATA_HOME` is set.
 - To force a fresh login, delete that directory and rerun the command; the CLI will relaunch the browser.
 - Custom `token_cache_dir` entries in `mcporter.json` continue to work as explicit overrides.
 
 ## 4. Programmatic Usage
 
 ```ts
-import { createRuntime } from "mcporter";
+import { createRuntime } from 'mcporter';
 
-const runtime = await createRuntime({ configPath: "./config/mcporter.json" });
-const tools = await runtime.listTools("chrome-devtools");
-await runtime.callTool("chrome-devtools", "take_screenshot", { args: { url: "https://x.com" } });
+const runtime = await createRuntime({ configPath: './config/mcporter.json' });
+const tools = await runtime.listTools('chrome-devtools');
+await runtime.callTool('chrome-devtools', 'take_screenshot', { args: { url: 'https://x.com' } });
 await runtime.close();
 ```
 
@@ -46,12 +46,12 @@ Prefer `createRuntime` for long-lived agents so connections and OAuth tokens can
 ## 5. Single Call Helper
 
 ```ts
-import { callOnce } from "mcporter";
+import { callOnce } from 'mcporter';
 
 await callOnce({
-  server: "firecrawl",
-  toolName: "crawl",
-  args: { url: "https://anthropic.com" },
+  server: 'firecrawl',
+  toolName: 'crawl',
+  args: { url: 'https://anthropic.com' },
 });
 ```
 
@@ -65,12 +65,12 @@ Use `callOnce` for fire-and-forget invocations.
 
 ## 7. Troubleshooting
 
-| Symptom | Fix |
-| --- | --- |
-| Browser did not open | Copy the printed OAuth URL manually into a browser. |
-| Authorization hangs | Ensure the callback URL can bind to `127.0.0.1`; firewalls may block it. |
-| Tokens are stale | Delete `~/.mcporter/<server>/tokens.json` and retry. |
-| Stdio command fails | Pass `--root` to point at the repo root so relative paths resolve. |
+| Symptom              | Fix                                                                                      |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| Browser did not open | Copy the printed OAuth URL manually into a browser.                                      |
+| Authorization hangs  | Ensure the callback URL can bind to `127.0.0.1`; firewalls may block it.                 |
+| Tokens are stale     | Run `mcporter auth --reset <server>` or delete the matching vault entry/cache and retry. |
+| Stdio command fails  | Pass `--root` to point at the repo root so relative paths resolve.                       |
 
 ---
 

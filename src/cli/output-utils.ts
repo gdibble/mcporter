@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { inspect } from 'node:util';
 import type { CallResult } from '../result-utils.js';
 import { logWarn } from './logger-context.js';
@@ -33,17 +34,8 @@ export function tailLogIfRequested(result: unknown, enabled: boolean): void {
     return;
   }
   const candidates: string[] = [];
-  if (typeof result === 'string') {
-    const idx = result.indexOf(':');
-    if (idx !== -1) {
-      const candidate = result.slice(idx + 1).trim();
-      if (candidate) {
-        candidates.push(candidate);
-      }
-    }
-  }
   if (result && typeof result === 'object') {
-    const possibleKeys = ['logPath', 'logFile', 'logfile', 'path'];
+    const possibleKeys = ['logPath', 'logFile', 'logfile'];
     for (const key of possibleKeys) {
       const value = (result as Record<string, unknown>)[key];
       if (typeof value === 'string') {
@@ -53,6 +45,10 @@ export function tailLogIfRequested(result: unknown, enabled: boolean): void {
   }
 
   for (const candidate of candidates) {
+    if (!path.isAbsolute(candidate)) {
+      logWarn(`Refusing to tail non-absolute log path: ${candidate}`);
+      continue;
+    }
     if (!fs.existsSync(candidate)) {
       logWarn(`Log path not found: ${candidate}`);
       continue;

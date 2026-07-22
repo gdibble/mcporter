@@ -73,6 +73,8 @@ if (STDIO_TRACE_ENABLED) {
   console.log('[mcporter] STDIO trace logging enabled (set MCPORTER_STDIO_TRACE=0 to disable).');
 }
 
+function ignoreEmitterError(): void {}
+
 function destroyStream(stream: unknown): void {
   if (!stream || typeof stream !== 'object') {
     return;
@@ -85,9 +87,8 @@ function destroyStream(stream: unknown): void {
     end?: () => void;
     unref?: () => void;
   };
-  const swallowError = () => {};
   try {
-    emitter.on?.('error', swallowError);
+    emitter.on?.('error', ignoreEmitterError);
   } catch {
     // ignore
   }
@@ -107,12 +108,12 @@ function destroyStream(stream: unknown): void {
     // ignore
   }
   try {
-    emitter.off?.('error', swallowError);
+    emitter.off?.('error', ignoreEmitterError);
   } catch {
     // ignore
   }
   try {
-    emitter.removeListener?.('error', swallowError);
+    emitter.removeListener?.('error', ignoreEmitterError);
   } catch {
     // ignore
   }
@@ -128,11 +129,10 @@ function waitForChildClose(child: MaybeChildProcess | undefined, timeoutMs: numb
   ) {
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     let settled = false;
-    const swallowProcessError = () => {};
     try {
-      child.on?.('error', swallowProcessError);
+      child.on?.('error', ignoreEmitterError);
     } catch {
       // ignore
     }
@@ -144,12 +144,20 @@ function waitForChildClose(child: MaybeChildProcess | undefined, timeoutMs: numb
       cleanup();
       resolve();
     };
+    const timeout = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error(`Timed out waiting ${timeoutMs}ms for child process to close.`));
+    };
     const cleanup = () => {
       child.removeListener('exit', finish);
       child.removeListener('close', finish);
       child.removeListener('error', finish);
       try {
-        child.removeListener?.('error', swallowProcessError);
+        child.removeListener?.('error', ignoreEmitterError);
       } catch {
         // ignore
       }
@@ -162,7 +170,7 @@ function waitForChildClose(child: MaybeChildProcess | undefined, timeoutMs: numb
     child.once('error', finish);
     let timer: NodeJS.Timeout | undefined;
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      timer = setTimeout(finish, timeoutMs);
+      timer = setTimeout(timeout, timeoutMs);
       timer.unref?.();
     }
   });
@@ -393,9 +401,8 @@ function patchStdioStart(): void {
           meta.stderrChunks.push(chunk.toString('utf8'));
         }
       };
-      const swallowError = () => {};
       (targetStream as NodeJS.EventEmitter).on('data', handleChunk);
-      (targetStream as NodeJS.EventEmitter).on('error', swallowError);
+      (targetStream as NodeJS.EventEmitter).on('error', ignoreEmitterError);
       meta.listeners.push({
         stream: targetStream as NodeJS.EventEmitter & {
           removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
@@ -408,7 +415,7 @@ function patchStdioStart(): void {
           removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
         },
         event: 'error',
-        handler: swallowError,
+        handler: ignoreEmitterError,
       });
     }
 
@@ -426,9 +433,8 @@ function patchStdioStart(): void {
           meta.stdoutChunks.push(chunk.toString('utf8'));
         }
       };
-      const swallowStdoutError = () => {};
       stdoutStream.on('data', handleStdout);
-      stdoutStream.on('error', swallowStdoutError);
+      stdoutStream.on('error', ignoreEmitterError);
       meta.listeners.push({
         stream: stdoutStream,
         event: 'data',
@@ -437,7 +443,7 @@ function patchStdioStart(): void {
       meta.listeners.push({
         stream: stdoutStream,
         event: 'error',
-        handler: swallowStdoutError,
+        handler: ignoreEmitterError,
       });
     }
 

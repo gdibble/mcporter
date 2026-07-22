@@ -4,6 +4,7 @@ import {
   buildFallbackLiteral,
   buildPlaceholder,
   buildToolMetadata,
+  buildToolMetadataList,
   extractOptions,
   getDescriptorDefault,
   getDescriptorDescription,
@@ -43,6 +44,15 @@ describe('generate helpers', () => {
     if (first) {
       expect(first.required).toBe(true);
     }
+  });
+
+  it('rejects generated proxy method collisions', () => {
+    expect(() =>
+      buildToolMetadataList([
+        { name: 'some-tool', inputSchema: undefined, outputSchema: undefined },
+        { name: 'some_tool', inputSchema: undefined, outputSchema: undefined },
+      ])
+    ).toThrow(/Generated proxy method collision 'someTool'/);
   });
 
   it('extracts detailed option information', () => {
@@ -90,6 +100,9 @@ describe('generate helpers', () => {
     expect(buildExampleValue('itemId', 'string', undefined, undefined)).toBe('example-id');
     expect(buildExampleValue('mode', 'string', ['fast'], undefined)).toBe('fast');
     expect(buildExampleValue('fields', 'object', undefined, undefined)).toBe('{"key":"value"}');
+    expect(buildExampleValue('scores', 'array', undefined, undefined, 'number')).toBe('1,2');
+    expect(buildExampleValue('flags', 'array', undefined, undefined, 'boolean')).toBe('true,false');
+    expect(buildExampleValue('records', 'array', undefined, undefined, 'object')).toBe('[{"key":"value"}]');
 
     expect(inferType({ type: 'boolean' })).toBe('boolean');
     expect(inferType({ type: 'integer' })).toBe('number');
@@ -100,7 +113,7 @@ describe('generate helpers', () => {
 
     expect(inferArrayItemType({ type: 'array', items: { type: 'integer' } })).toBe('number');
     expect(inferArrayItemType({ type: 'array', items: { type: ['null', 'boolean'] } })).toBe('boolean');
-    expect(inferArrayItemType({ type: 'array', items: { type: 'object' } })).toBe('unknown');
+    expect(inferArrayItemType({ type: 'array', items: { type: 'object' } })).toBe('object');
 
     expect(getDescriptorDescription({ description: 'hi' })).toBe('hi');
     expect(getDescriptorDescription({})).toBeUndefined();
@@ -135,6 +148,61 @@ describe('generate helpers', () => {
     ).toBe('["foo", "bar"]');
     expect(
       pickExampleLiteral({
+        type: 'array',
+        arrayItemType: 'number',
+        exampleValue: '1,2',
+        property: 'scores',
+        cliName: 'scores',
+        required: true,
+        placeholder: '<scores>',
+      })
+    ).toBe('[1, 2]');
+    expect(
+      pickExampleLiteral({
+        type: 'array',
+        arrayItemType: 'boolean',
+        exampleValue: 'true,false',
+        property: 'flags',
+        cliName: 'flags',
+        required: true,
+        placeholder: '<flags>',
+      })
+    ).toBe('[true, false]');
+    expect(
+      pickExampleLiteral({
+        type: 'array',
+        arrayItemType: 'object',
+        exampleValue: '[{"key":"value"}]',
+        property: 'records',
+        cliName: 'records',
+        required: true,
+        placeholder: '<records>',
+      })
+    ).toBe('[{"key":"value"}]');
+    expect(
+      pickExampleLiteral({
+        type: 'array',
+        arrayItemType: 'number',
+        defaultValue: [3, 5],
+        property: 'scores',
+        cliName: 'scores',
+        required: true,
+        placeholder: '<scores>',
+      })
+    ).toBe('[3,5]');
+    expect(
+      pickExampleLiteral({
+        type: 'array',
+        arrayItemType: 'string',
+        enumValues: ['alpha', 'beta'],
+        property: 'labels',
+        cliName: 'labels',
+        required: true,
+        placeholder: '<labels>',
+      })
+    ).toBe('["alpha"]');
+    expect(
+      pickExampleLiteral({
         type: 'string',
         enumValues: ['alpha', 'beta'],
         property: 'mode',
@@ -152,6 +220,36 @@ describe('generate helpers', () => {
         placeholder: '<issue-id>',
       })
     ).toBe('"example-id"');
+    expect(
+      buildFallbackLiteral({
+        type: 'array',
+        arrayItemType: 'number',
+        property: 'scores',
+        cliName: 'scores',
+        required: false,
+        placeholder: '<scores>',
+      })
+    ).toBe('[1]');
+    expect(
+      buildFallbackLiteral({
+        type: 'array',
+        arrayItemType: 'boolean',
+        property: 'flags',
+        cliName: 'flags',
+        required: false,
+        placeholder: '<flags>',
+      })
+    ).toBe('[true]');
+    expect(
+      buildFallbackLiteral({
+        type: 'array',
+        arrayItemType: 'object',
+        property: 'records',
+        cliName: 'records',
+        required: false,
+        placeholder: '<records>',
+      })
+    ).toBe('[{"key":"value"}]');
     expect(
       buildFallbackLiteral({
         type: 'array',

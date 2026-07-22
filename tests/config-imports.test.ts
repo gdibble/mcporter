@@ -79,7 +79,7 @@ describe('config imports', () => {
     });
     const homeDir = ensureFakeHomeDir();
 
-    const names = servers.map((server) => server.name).sort();
+    const names = servers.map((server) => server.name).toSorted();
     expect(names).toEqual([
       'claude-home',
       'claude-local',
@@ -101,6 +101,11 @@ describe('config imports', () => {
     expect(shared?.command.kind === 'http' ? shared.command.url.toString() : undefined).toBe(
       'https://cursor.local/mcp'
     );
+    expect(shared?.httpFetch).toBe('node-http1');
+    expect(shared?.refresh).toEqual({
+      tokenEndpoint: 'https://auth.cursor.local/token',
+      accessTokenEnv: 'CURSOR_ACCESS_TOKEN',
+    });
     expect(shared?.source).toEqual({
       kind: 'import',
       path: path.join(FIXTURE_ROOT, '.cursor', 'mcp.json'),
@@ -211,6 +216,48 @@ describe('config imports', () => {
       expect(claudeHome?.source).toEqual({
         kind: 'import',
         path: path.join(ensureFakeHomeDir(), '.claude', 'settings.json'),
+        importKind: 'claude-code',
+      });
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a later imported duplicate when an earlier import has unresolved placeholders', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mcporter-import-fallback-'));
+    try {
+      const configPath = path.join(tempRoot, 'config', 'mcporter.json');
+      const cursorPath = path.join(tempRoot, '.cursor', 'mcp.json');
+      const claudePath = path.join(ensureFakeHomeDir(), '.claude', 'settings.json');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
+
+      fs.writeFileSync(configPath, JSON.stringify({ mcpServers: {}, imports: ['cursor', 'claude-code'] }));
+      fs.writeFileSync(
+        cursorPath,
+        JSON.stringify({
+          mcpServers: {
+            shared: { command: 'cursor-mcp', args: ['${workspaceFolder}'] },
+          },
+        })
+      );
+      fs.writeFileSync(
+        claudePath,
+        JSON.stringify({
+          mcpServers: {
+            shared: { command: 'claude-mcp', args: ['--usable'] },
+          },
+        })
+      );
+
+      const servers = await loadServerDefinitions({ configPath, rootDir: tempRoot });
+      const shared = servers.find((server) => server.name === 'shared');
+
+      expect(shared?.command.kind).toBe('stdio');
+      expect(shared?.command.kind === 'stdio' ? shared.command.command : undefined).toBe('claude-mcp');
+      expect(shared?.source).toEqual({
+        kind: 'import',
+        path: claudePath,
         importKind: 'claude-code',
       });
     } finally {

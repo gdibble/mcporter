@@ -34,6 +34,8 @@ const RawLifecycleSchema = z
 
 export type RawLifecycle = z.infer<typeof RawLifecycleSchema>;
 
+const ToolNamesSchema = z.array(z.string()).describe('Exact MCP tool names');
+
 const RawLoggingSchema = z
   .object({
     daemon: z
@@ -45,6 +47,37 @@ const RawLoggingSchema = z
   })
   .optional()
   .describe('Logging configuration for the server');
+
+const RawHttpFetchSchema = z
+  .enum(['default', 'node-http1'])
+  .describe('HTTP fetch implementation for Streamable HTTP/SSE requests');
+
+const RawRefreshSchema = z
+  .object({
+    tokenEndpoint: z.string().optional().describe('OAuth token endpoint used to refresh access tokens'),
+    token_endpoint: z.string().optional().describe('OAuth token endpoint used to refresh access tokens'),
+    clientIdEnv: z.string().optional().describe('Environment variable containing the OAuth client id'),
+    client_id_env: z.string().optional().describe('Environment variable containing the OAuth client id'),
+    clientSecretEnv: z.string().optional().describe('Environment variable containing the OAuth client secret'),
+    client_secret_env: z.string().optional().describe('Environment variable containing the OAuth client secret'),
+    clientAuthMethod: z.string().optional().describe('OAuth token endpoint client auth method'),
+    client_auth_method: z.string().optional().describe('OAuth token endpoint client auth method'),
+    refreshSkewSeconds: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Refresh before expiry by this many seconds'),
+    refresh_skew_seconds: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Refresh before expiry by this many seconds'),
+    accessTokenEnv: z.string().optional().describe('STDIO env var that receives the refreshed access token'),
+    access_token_env: z.string().optional().describe('STDIO env var that receives the refreshed access token'),
+  })
+  .describe('Refreshable bearer token settings');
 
 export const RawEntrySchema = z
   .object({
@@ -60,19 +93,39 @@ export const RawEntrySchema = z
       .describe('Command to spawn for stdio transport (string or array of arguments)'),
     executable: z.string().optional().describe('Executable path for stdio transport'),
     args: z.array(z.string()).optional().describe('Arguments to pass to the stdio command'),
+    cwd: z
+      .string()
+      .optional()
+      .describe(
+        'Working directory for stdio servers. A leading ~ is expanded to $HOME; relative paths resolve against the config file directory'
+      ),
     headers: z
       .record(z.string(), z.string())
       .optional()
-      .describe('HTTP headers for requests. Supports $VAR and $env:VAR placeholders'),
+      .describe('HTTP headers for requests. Supports ${VAR}, ${VAR:-fallback}, and $env:VAR placeholders'),
     env: z
       .record(z.string(), z.string())
       .optional()
-      .describe('Environment variables for stdio commands. Supports $VAR and fallback syntax'),
+      .describe('Environment variables for stdio commands. Supports ${VAR} and ${VAR:-fallback} placeholders'),
     auth: z.string().optional().describe('Authentication method (e.g., "oauth")'),
     tokenCacheDir: z.string().optional().describe('Directory for caching OAuth tokens (camelCase)'),
     token_cache_dir: z.string().optional().describe('Directory for caching OAuth tokens (snake_case)'),
     clientName: z.string().optional().describe('Client identifier for server telemetry (camelCase)'),
     client_name: z.string().optional().describe('Client identifier for server telemetry (snake_case)'),
+    oauthClientId: z.string().optional().describe('Pre-registered OAuth client id (camelCase)'),
+    oauth_client_id: z.string().optional().describe('Pre-registered OAuth client id (snake_case)'),
+    oauthClientSecret: z.string().optional().describe('Pre-registered OAuth client secret (camelCase)'),
+    oauth_client_secret: z.string().optional().describe('Pre-registered OAuth client secret (snake_case)'),
+    oauthClientSecretEnv: z.string().optional().describe('Environment variable containing the OAuth client secret'),
+    oauth_client_secret_env: z.string().optional().describe('Environment variable containing the OAuth client secret'),
+    oauthTokenEndpointAuthMethod: z
+      .string()
+      .optional()
+      .describe('OAuth token endpoint auth method, e.g. client_secret_post'),
+    oauth_token_endpoint_auth_method: z
+      .string()
+      .optional()
+      .describe('OAuth token endpoint auth method, e.g. client_secret_post'),
     oauthRedirectUrl: z.string().optional().describe('Custom OAuth redirect URL (camelCase)'),
     oauth_redirect_url: z.string().optional().describe('Custom OAuth redirect URL (snake_case)'),
     oauthScope: z.string().optional().describe('OAuth scope override (camelCase)'),
@@ -96,14 +149,44 @@ export const RawEntrySchema = z
       .string()
       .optional()
       .describe('Environment variable name containing the bearer token (snake_case)'),
+    refresh: RawRefreshSchema.optional(),
+    httpFetch: RawHttpFetchSchema.optional().describe('HTTP fetch implementation for Streamable HTTP/SSE requests'),
+    http_fetch: RawHttpFetchSchema.optional().describe('HTTP fetch implementation for Streamable HTTP/SSE requests'),
     lifecycle: RawLifecycleSchema.optional(),
     logging: RawLoggingSchema,
+    allowedTools: ToolNamesSchema.optional().describe('Only these exact tool names are exposed (camelCase)'),
+    allowed_tools: ToolNamesSchema.optional().describe('Only these exact tool names are exposed (snake_case)'),
+    blockedTools: ToolNamesSchema.optional().describe('These exact tool names are hidden and blocked (camelCase)'),
+    blocked_tools: ToolNamesSchema.optional().describe('These exact tool names are hidden and blocked (snake_case)'),
+  })
+  .superRefine((entry, ctx) => {
+    const hasAllowed = entry.allowedTools !== undefined || entry.allowed_tools !== undefined;
+    const hasBlocked = entry.blockedTools !== undefined || entry.blocked_tools !== undefined;
+    if (hasAllowed && hasBlocked) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Specify either allowedTools or blockedTools, not both.',
+        path: ['allowedTools'],
+      });
+    }
   })
   .describe('MCP server definition supporting both HTTP/SSE and stdio transports');
 
 export const RawConfigSchema = z
   .object({
     mcpServers: z.record(z.string(), RawEntrySchema).describe('Map of server names to their configurations'),
+    daemonIdleTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Idle timeout in milliseconds before shutting down an inactive daemon'),
+    daemon_idle_timeout_ms: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Idle timeout in milliseconds before shutting down an inactive daemon'),
     imports: z
       .array(ImportKindSchema)
       .optional()
@@ -113,6 +196,7 @@ export const RawConfigSchema = z
 
 export type RawEntry = z.infer<typeof RawEntrySchema>;
 export type RawConfig = z.infer<typeof RawConfigSchema>;
+export type RawRefresh = z.infer<typeof RawRefreshSchema>;
 
 export interface HttpCommand {
   readonly kind: 'http';
@@ -150,6 +234,15 @@ export interface ServerLoggingOptions {
   };
 }
 
+export interface RefreshableBearerOptions {
+  readonly tokenEndpoint: string;
+  readonly clientIdEnv?: string;
+  readonly clientSecretEnv?: string;
+  readonly clientAuthMethod?: string;
+  readonly refreshSkewSeconds?: number;
+  readonly accessTokenEnv?: string;
+}
+
 export interface ServerDefinition {
   readonly name: string;
   readonly description?: string;
@@ -158,15 +251,25 @@ export interface ServerDefinition {
   readonly auth?: string;
   readonly tokenCacheDir?: string;
   readonly clientName?: string;
+  readonly oauthClientId?: string;
+  readonly oauthClientSecret?: string;
+  readonly oauthClientSecretEnv?: string;
+  readonly oauthTokenEndpointAuthMethod?: string;
   readonly oauthRedirectUrl?: string;
   readonly oauthScope?: string;
   readonly oauthCommand?: {
     readonly args: string[];
   };
+  readonly refresh?: RefreshableBearerOptions;
+  readonly httpFetch?: 'default' | 'node-http1';
   readonly source?: ServerSource;
   readonly sources?: readonly ServerSource[];
   readonly lifecycle?: ServerLifecycle;
   readonly logging?: ServerLoggingOptions;
+  /** When specified, only these exact tool names are exposed. Empty array blocks all tools. */
+  readonly allowedTools?: readonly string[];
+  /** When specified, these exact tool names are hidden and blocked. Cannot be combined with allowedTools. */
+  readonly blockedTools?: readonly string[];
 }
 
 export interface LoadConfigOptions {

@@ -23,8 +23,15 @@ export interface SerializedServerDefinition {
   readonly auth?: string;
   readonly tokenCacheDir?: string;
   readonly clientName?: string;
+  readonly oauthClientId?: string;
+  readonly oauthClientSecretEnv?: string;
+  readonly oauthTokenEndpointAuthMethod?: string;
   readonly oauthRedirectUrl?: string;
   readonly oauthScope?: string;
+  readonly refresh?: ServerDefinition['refresh'];
+  readonly httpFetch?: ServerDefinition['httpFetch'];
+  readonly allowedTools?: readonly string[];
+  readonly blockedTools?: readonly string[];
 }
 
 export interface CliArtifactMetadata {
@@ -67,16 +74,26 @@ export function metadataPathForArtifact(artifactPath: string): string {
 // readCliMetadata loads metadata for a generated CLI artifact, preferring the embedded
 // inspect command and falling back to legacy sidecar files.
 export async function readCliMetadata(artifactPath: string): Promise<CliArtifactMetadata> {
+  let embeddedError: unknown;
+  try {
+    return await readMetadataFromCli(artifactPath);
+  } catch (error) {
+    embeddedError = error;
+  }
+
   const legacyPath = metadataPathForArtifact(artifactPath);
   try {
     const buffer = await fs.readFile(legacyPath, 'utf8');
     return JSON.parse(buffer) as CliArtifactMetadata;
   } catch (error) {
+    if (isErrno(error, 'ENOENT') && embeddedError) {
+      throw embeddedError;
+    }
     if (!isErrno(error, 'ENOENT')) {
       throw error;
     }
   }
-  return await readMetadataFromCli(artifactPath);
+  throw embeddedError;
 }
 
 async function readMetadataFromCli(artifactPath: string): Promise<CliArtifactMetadata> {
@@ -141,8 +158,15 @@ export function serializeDefinition(definition: ServerDefinition): SerializedSer
       auth: definition.auth,
       tokenCacheDir: definition.tokenCacheDir,
       clientName: definition.clientName,
+      oauthClientId: definition.oauthClientId,
+      oauthClientSecretEnv: definition.oauthClientSecretEnv,
+      oauthTokenEndpointAuthMethod: definition.oauthTokenEndpointAuthMethod,
       oauthRedirectUrl: definition.oauthRedirectUrl,
       oauthScope: definition.oauthScope,
+      refresh: definition.refresh,
+      httpFetch: definition.httpFetch,
+      allowedTools: definition.allowedTools,
+      blockedTools: definition.blockedTools,
     };
   }
   return {
@@ -158,7 +182,14 @@ export function serializeDefinition(definition: ServerDefinition): SerializedSer
     auth: definition.auth,
     tokenCacheDir: definition.tokenCacheDir,
     clientName: definition.clientName,
+    oauthClientId: definition.oauthClientId,
+    oauthClientSecretEnv: definition.oauthClientSecretEnv,
+    oauthTokenEndpointAuthMethod: definition.oauthTokenEndpointAuthMethod,
     oauthRedirectUrl: definition.oauthRedirectUrl,
     oauthScope: definition.oauthScope,
+    refresh: definition.refresh,
+    httpFetch: definition.httpFetch,
+    allowedTools: definition.allowedTools,
+    blockedTools: definition.blockedTools,
   };
 }

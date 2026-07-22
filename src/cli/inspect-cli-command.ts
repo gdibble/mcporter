@@ -49,6 +49,18 @@ export async function handleInspectCli(args: string[]): Promise<void> {
   }
 }
 
+export function printInspectCliHelp(): void {
+  console.error(
+    [
+      'Usage: mcporter inspect-cli <artifact> [flags]',
+      '',
+      'Flags:',
+      '  --json                  Print embedded metadata as JSON.',
+      '  --format text|json      Choose output format.',
+    ].join('\n')
+  );
+}
+
 function parseInspectFlags(args: string[]): InspectFlags {
   let format = consumeOutputFormat(args, {
     defaultFormat: 'text',
@@ -80,6 +92,9 @@ function parseInspectFlags(args: string[]): InspectFlags {
   const artifactPath = args.shift();
   if (!artifactPath) {
     throw new Error('Usage: mcporter inspect-cli <artifact> [--json]');
+  }
+  if (args.length > 0) {
+    throw new Error(`Unexpected inspect-cli argument '${args[0]}'.`);
   }
   return { artifactPath, format };
 }

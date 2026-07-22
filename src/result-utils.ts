@@ -30,32 +30,37 @@ interface CollectedCallContent {
 }
 
 function extractEnvelope(raw: unknown): ExtractedEnvelope {
+  return collectEnvelopeFields(raw, { content: null, structuredContent: null }, 0);
+}
+
+function collectEnvelopeFields(raw: unknown, envelope: ExtractedEnvelope, depth: number): ExtractedEnvelope {
   if (!raw || typeof raw !== 'object') {
-    return { content: null, structuredContent: null };
+    return envelope;
   }
 
   const obj = raw as Record<string, unknown>;
-  let content: unknown[] | null = null;
-  let structuredContent: unknown = null;
+  let { content, structuredContent } = envelope;
 
-  if ('content' in obj && Array.isArray(obj.content)) {
+  if (!content && 'content' in obj && Array.isArray(obj.content)) {
     content = obj.content as unknown[];
   }
-  if ('structuredContent' in obj) {
+  if (structuredContent === null && 'structuredContent' in obj) {
     structuredContent = obj.structuredContent;
   }
 
-  if ('raw' in obj && obj.raw && typeof obj.raw === 'object') {
-    const nested = obj.raw as Record<string, unknown>;
-    if (!content && 'content' in nested && Array.isArray(nested.content)) {
-      content = nested.content as unknown[];
-    }
-    if (structuredContent === null && 'structuredContent' in nested) {
-      structuredContent = nested.structuredContent;
-    }
+  const updated = { content, structuredContent };
+  if (depth >= 2) {
+    return updated;
   }
 
-  return { content, structuredContent };
+  let nested = updated;
+  if ('raw' in obj) {
+    nested = collectEnvelopeFields(obj.raw, nested, depth + 1);
+  }
+  if ('result' in obj) {
+    nested = collectEnvelopeFields(obj.result, nested, depth + 1);
+  }
+  return nested;
 }
 
 // asString converts known content/value shapes into plain strings.
@@ -76,6 +81,15 @@ function collectCallContent(raw: unknown): CollectedCallContent {
   const markdownEntries: string[] = [];
   const jsonCandidates: unknown[] = [];
   const images: ImageContent[] = [];
+  const rawContents =
+    raw && typeof raw === 'object' && Array.isArray((raw as { contents?: unknown }).contents)
+      ? ((raw as { contents: unknown[] }).contents ?? [])
+      : undefined;
+  if (rawContents) {
+    for (const resource of rawContents) {
+      collectResourcePayload(resource, textEntries, markdownEntries, jsonCandidates);
+    }
+  }
 
   if (!envelope.content) {
     return {
@@ -118,22 +132,7 @@ function collectCallContent(raw: unknown): CollectedCallContent {
     }
     if (typedEntry.type === 'resource') {
       const resource = typedEntry.resource as Record<string, unknown> | undefined;
-      if (resource && typeof resource === 'object') {
-        const uri = typeof resource.uri === 'string' ? resource.uri : '';
-        const mimeType = typeof resource.mimeType === 'string' ? resource.mimeType : '';
-        if (typeof resource.text === 'string') {
-          textEntries.push(resource.text);
-          if (mimeType.toLowerCase().includes('markdown')) {
-            markdownEntries.push(resource.text);
-          }
-          const parsed = tryParseJson(resource.text);
-          if (parsed !== null) {
-            jsonCandidates.push(parsed);
-          }
-        } else if (typeof resource.blob === 'string') {
-          textEntries.push(`[Binary resource: ${uri}]`);
-        }
-      }
+      collectResourcePayload(resource, textEntries, markdownEntries, jsonCandidates);
       continue;
     }
     if (typedEntry.type !== 'text' && typedEntry.type !== 'markdown') {
@@ -162,6 +161,32 @@ function collectCallContent(raw: unknown): CollectedCallContent {
     jsonCandidates,
     images,
   };
+}
+
+function collectResourcePayload(
+  resource: unknown,
+  textEntries: string[],
+  markdownEntries: string[],
+  jsonCandidates: unknown[]
+): void {
+  if (!resource || typeof resource !== 'object') {
+    return;
+  }
+  const record = resource as Record<string, unknown>;
+  const uri = typeof record.uri === 'string' ? record.uri : '';
+  const mimeType = typeof record.mimeType === 'string' ? record.mimeType : '';
+  if (typeof record.text === 'string') {
+    textEntries.push(record.text);
+    if (mimeType.toLowerCase().includes('markdown')) {
+      markdownEntries.push(record.text);
+    }
+    const parsed = tryParseJson(record.text);
+    if (parsed !== null) {
+      jsonCandidates.push(parsed);
+    }
+  } else if (typeof record.blob === 'string') {
+    textEntries.push(`[Binary resource: ${uri}]`);
+  }
 }
 
 function collectText(entries: string[], joiner: string): string | null {

@@ -3,10 +3,7 @@
     "chrome-devtools": {
       "description": "Chrome DevTools protocol bridge for driving local tabs during debugging or automation.",
       "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest"
-      ],
+      "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect"],
       "env": {
         "npm_config_loglevel": "error"
       }
@@ -14,10 +11,7 @@
     "mobile-mcp": {
       "description": "Mobile Next MCP server for automating iOS/Android simulators and devices.",
       "command": "npx",
-      "args": [
-        "-y",
-        "@mobilenext/mobile-mcp@latest"
-      ],
+      "args": ["-y", "@mobilenext/mobile-mcp@latest"],
       "env": {
         "npm_config_loglevel": "error"
       }
@@ -47,10 +41,7 @@
     "obsidian": {
       "description": "Local Obsidian vault access via obsidian-mcp-server.",
       "command": "npx",
-      "args": [
-        "-y",
-        "obsidian-mcp-server@latest"
-      ],
+      "args": ["-y", "obsidian-mcp-server@latest"],
       "env": {
         "OBSIDIAN_API_KEY": "${OBSIDIAN_API_KEY}",
         "OBSIDIAN_BASE_URL": "${OBSIDIAN_BASE_URL:-https://127.0.0.1:27124}",
@@ -84,10 +75,7 @@
     "signoz": {
       "description": "SigNoz Query MCP server (logs, traces, metrics).",
       "command": "npx",
-      "args": [
-        "-y",
-        "signoz-mcp-server@latest"
-      ],
+      "args": ["-y", "signoz-mcp-server@latest"],
       "env": {
         "SIGNOZ_URL": "${SIGNOZ_URL:-http://localhost:3301}",
         "SIGNOZ_TOKEN": "${SIGNOZ_TOKEN:-}",
@@ -102,13 +90,7 @@
     "iterm": {
       "description": "iTerm2 terminal bridge via local iterm-mcp",
       "command": "pnpm",
-      "args": [
-        "--dir",
-        "/Users/steipete/Projects/iterm-mcp",
-        "exec",
-        "node",
-        "build/index.js"
-      ],
+      "args": ["--dir", "/Users/steipete/Projects/iterm-mcp", "exec", "node", "build/index.js"],
       "env": {
         "npm_config_loglevel": "error"
       }
@@ -116,19 +98,11 @@
     "XcodeBuildMCP": {
       "description": "XcodeBuild MCP server for building, testing, and inspecting Xcode projects and simulators.",
       "command": "npx",
-      "args": [
-        "-y",
-        "xcodebuildmcp@latest"
-      ],
+      "args": ["-y", "xcodebuildmcp@latest"],
       "env": {
         "npm_config_loglevel": "error"
       }
     }
   },
-  "imports": [
-    "cursor",
-    "claude-code",
-    "claude-desktop",
-    "codex"
-  ]
+  "imports": ["cursor", "claude-code", "claude-desktop", "codex"]
 }

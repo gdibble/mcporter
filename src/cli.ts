@@ -1,31 +1,111 @@
 #!/usr/bin/env node
-import { handleAuth, printAuthHelp } from './cli/auth-command.js';
-import { printCallHelp, handleCall as runHandleCall } from './cli/call-command.js';
 import { buildGlobalContext } from './cli/cli-factory.js';
 import { inferCommandRouting } from './cli/command-inference.js';
-import { handleConfigCli } from './cli/config-command.js';
-import { handleDaemonCli } from './cli/daemon-command.js';
-import { handleEmitTs } from './cli/emit-ts-command.js';
 import { CliUsageError } from './cli/errors.js';
-import { handleGenerateCli } from './cli/generate-cli-runner.js';
 import { consumeHelpTokens, isHelpToken, isVersionToken, printHelp, printVersion } from './cli/help-output.js';
-import { handleInspectCli } from './cli/inspect-cli-command.js';
-import { handleList, printListHelp } from './cli/list-command.js';
 import { logError, logInfo } from './cli/logger-context.js';
+import { isRecordReplayModeActive, isReplayModeActive } from './cli/record-replay-env.js';
 import { DEBUG_HANG, dumpActiveHandles, terminateChildProcesses } from './cli/runtime-debug.js';
-import { resolveConfigPath } from './config.js';
-import { DaemonClient } from './daemon/client.js';
-import { createKeepAliveRuntime } from './daemon/runtime-wrapper.js';
-import { isKeepAliveServer } from './lifecycle.js';
-import { createRuntime } from './runtime.js';
+import { resolveConfigPath } from './config/path-discovery.js';
+import type { Runtime, RuntimeOptions } from './runtime.js';
 
-export { handleAuth, printAuthHelp } from './cli/auth-command.js';
 export { parseCallArguments } from './cli/call-arguments.js';
-export { handleCall } from './cli/call-command.js';
-export { handleGenerateCli } from './cli/generate-cli-runner.js';
-export { handleInspectCli } from './cli/inspect-cli-command.js';
-export { extractListFlags, handleList } from './cli/list-command.js';
+export { extractListFlags } from './cli/list-flags.js';
 export { resolveCallTimeout } from './cli/timeouts.js';
+
+const FORCE_EXIT_GRACE_MS = 50;
+const STDOUT_FLUSH_TIMEOUT_MS = 2000;
+const DAEMON_FAST_PATH_SERVERS = new Set(['chrome-devtools', 'mobile-mcp', 'playwright']);
+
+function handleStdioError(error: Error): void {
+  if ((error as NodeJS.ErrnoException).code === 'EPIPE') {
+    return;
+  }
+  throw error;
+}
+
+function installStdioErrorHandlers(): void {
+  process.stdout.on('error', handleStdioError);
+  process.stderr.on('error', handleStdioError);
+}
+
+function flushWriteStreamForExit(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    if (!stream.writable || stream.destroyed || stream.writableEnded) {
+      resolve();
+      return;
+    }
+    stream.write('', () => {
+      resolve();
+    });
+  });
+}
+
+function flushStdioThenForceExit(): void {
+  let exited = false;
+  const exit = () => {
+    if (exited) {
+      return;
+    }
+    exited = true;
+    process.exit(process.exitCode ?? 0);
+  };
+  const fallback = setTimeout(exit, STDOUT_FLUSH_TIMEOUT_MS);
+  fallback.unref?.();
+  void Promise.allSettled([flushWriteStreamForExit(process.stdout), flushWriteStreamForExit(process.stderr)]).then(
+    () => {
+      clearTimeout(fallback);
+      exit();
+    }
+  );
+}
+
+export async function handleAuth(
+  ...args: Parameters<typeof import('./cli/auth-command.js').handleAuth>
+): ReturnType<typeof import('./cli/auth-command.js').handleAuth> {
+  const { handleAuth: imported } = await import('./cli/auth-command.js');
+  return imported(...args);
+}
+
+export async function printAuthHelp(): Promise<void> {
+  const { printAuthHelp: imported } = await import('./cli/auth-command.js');
+  imported();
+}
+
+export async function handleCall(
+  ...args: Parameters<typeof import('./cli/call-command.js').handleCall>
+): ReturnType<typeof import('./cli/call-command.js').handleCall> {
+  const { handleCall: imported } = await import('./cli/call-command.js');
+  return imported(...args);
+}
+
+export async function handleGenerateCli(
+  ...args: Parameters<typeof import('./cli/generate-cli-runner.js').handleGenerateCli>
+): ReturnType<typeof import('./cli/generate-cli-runner.js').handleGenerateCli> {
+  const { handleGenerateCli: imported } = await import('./cli/generate-cli-runner.js');
+  return imported(...args);
+}
+
+export async function handleInspectCli(
+  ...args: Parameters<typeof import('./cli/inspect-cli-command.js').handleInspectCli>
+): ReturnType<typeof import('./cli/inspect-cli-command.js').handleInspectCli> {
+  const { handleInspectCli: imported } = await import('./cli/inspect-cli-command.js');
+  return imported(...args);
+}
+
+export async function handleList(
+  ...args: Parameters<typeof import('./cli/list-command.js').handleList>
+): ReturnType<typeof import('./cli/list-command.js').handleList> {
+  const { handleList: imported } = await import('./cli/list-command.js');
+  return imported(...args);
+}
+
+export async function handleResource(
+  ...args: Parameters<typeof import('./cli/resource-command.js').handleResource>
+): ReturnType<typeof import('./cli/resource-command.js').handleResource> {
+  const { handleResource: imported } = await import('./cli/resource-command.js');
+  return imported(...args);
+}
 
 export async function runCli(argv: string[]): Promise<void> {
   const args = [...argv];
@@ -62,11 +142,25 @@ export async function runCli(argv: string[]): Promise<void> {
 
   // Early-exit command handlers that don't require runtime inference.
   if (command === 'generate-cli') {
-    await handleGenerateCli(args, globalFlags);
+    if (consumeHelpTokens(args)) {
+      const { printGenerateCliHelp } = await import('./cli/generate-cli-runner.js');
+      printGenerateCliHelp();
+      process.exitCode = 0;
+      return;
+    }
+    const { handleGenerateCli: importedHandleGenerateCli } = await import('./cli/generate-cli-runner.js');
+    await importedHandleGenerateCli(args, globalFlags);
     return;
   }
   if (command === 'inspect-cli') {
-    await handleInspectCli(args);
+    if (consumeHelpTokens(args)) {
+      const { printInspectCliHelp } = await import('./cli/inspect-cli-command.js');
+      printInspectCliHelp();
+      process.exitCode = 0;
+      return;
+    }
+    const { handleInspectCli: importedHandleInspectCli } = await import('./cli/inspect-cli-command.js');
+    await importedHandleInspectCli(args);
     return;
   }
   const rootOverride = globalFlags['--root'];
@@ -81,6 +175,7 @@ export async function runCli(argv: string[]): Promise<void> {
   };
 
   if (command === 'daemon') {
+    const { handleDaemonCli } = await import('./cli/daemon-command.js');
     await handleDaemonCli(args, {
       configPath: configPathResolved,
       configExplicit: configResolution.explicit,
@@ -89,7 +184,45 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === 'serve') {
+    const { handleServeCli, printServeHelp } = await import('./cli/serve-command.js');
+    if (consumeHelpTokens(args)) {
+      printServeHelp();
+      process.exitCode = 0;
+      return;
+    }
+    await handleServeCli(args, {
+      configPath: configPathResolved,
+      configExplicit: configResolution.explicit,
+      rootDir: rootOverride,
+    });
+    return;
+  }
+
+  if (command === 'record') {
+    const { handleRecordCli, printRecordHelp } = await import('./cli/record-command.js');
+    if (consumeHelpTokens(wrapperArgsBeforeSeparator(args))) {
+      printRecordHelp();
+      process.exitCode = 0;
+      return;
+    }
+    await handleRecordCli(args);
+    return;
+  }
+
+  if (command === 'replay') {
+    const { handleReplayCli, printReplayHelp } = await import('./cli/replay-command.js');
+    if (consumeHelpTokens(wrapperArgsBeforeSeparator(args))) {
+      printReplayHelp();
+      process.exitCode = 0;
+      return;
+    }
+    await handleReplayCli(args);
+    return;
+  }
+
   if (command === 'config') {
+    const { handleConfigCli } = await import('./cli/config-command.js');
     await handleConfigCli(
       {
         loadOptions: { configPath, rootDir: rootOverride },
@@ -101,6 +234,16 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   if (command === 'emit-ts') {
+    if (consumeHelpTokens(args)) {
+      const { printEmitTsHelp } = await import('./cli/emit-ts-command.js');
+      printEmitTsHelp();
+      process.exitCode = 0;
+      return;
+    }
+    const [{ createRuntime }, { handleEmitTs }] = await Promise.all([
+      import('./runtime.js'),
+      import('./cli/emit-ts-command.js'),
+    ]);
     const runtime = await createRuntime(runtimeOptionsWithPath);
     try {
       await handleEmitTs(runtime, args);
@@ -110,15 +253,28 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
+  if (await maybeHandleDaemonFastCall(command, args, configResolution, rootOverride)) {
+    return;
+  }
+
+  const [{ createRuntime }, { DaemonClient }, { createKeepAliveRuntime }, { isKeepAliveServer }] = await Promise.all([
+    import('./runtime.js'),
+    import('./daemon/client.js'),
+    import('./daemon/runtime-wrapper.js'),
+    import('./lifecycle.js'),
+  ]);
   const baseRuntime = await createRuntime(runtimeOptionsWithPath);
-  const keepAliveServers = new Set(
-    baseRuntime
-      .getDefinitions()
-      .filter(isKeepAliveServer)
-      .map((entry) => entry.name)
-  );
+  const recordReplayModeActive = isRecordReplayModeActive();
+  const keepAliveServers = recordReplayModeActive
+    ? new Set<string>()
+    : new Set(
+        baseRuntime
+          .getDefinitions()
+          .filter(isKeepAliveServer)
+          .map((entry) => entry.name)
+      );
   const daemonClient =
-    keepAliveServers.size > 0
+    !recordReplayModeActive && keepAliveServers.size > 0
       ? new DaemonClient({
           configPath: configResolution.path,
           configExplicit: configResolution.explicit,
@@ -127,83 +283,136 @@ export async function runCli(argv: string[]): Promise<void> {
       : null;
   const runtime = createKeepAliveRuntime(baseRuntime, { daemonClient, keepAliveServers });
 
-  const inference = inferCommandRouting(command, args, runtime.getDefinitions());
-  if (inference.kind === 'abort') {
-    process.exitCode = inference.exitCode;
-    return;
-  }
-  const resolvedCommand = inference.command;
-  const resolvedArgs = inference.args;
-
+  let primaryError: unknown;
   try {
+    const inference = inferCommandRouting(command, args, runtime.getDefinitions());
+    if (inference.kind === 'abort') {
+      process.exitCode = inference.exitCode;
+      return;
+    }
+    const resolvedCommand = inference.command;
+    const resolvedArgs = inference.args;
+
     if (resolvedCommand === 'list') {
       if (consumeHelpTokens(resolvedArgs)) {
+        const { printListHelp } = await import('./cli/list-command.js');
         printListHelp();
         process.exitCode = 0;
         return;
       }
-      await handleList(runtime, resolvedArgs);
+      const { handleList: importedHandleList } = await import('./cli/list-command.js');
+      await importedHandleList(runtime, resolvedArgs);
       return;
     }
 
     if (resolvedCommand === 'call') {
       if (consumeHelpTokens(resolvedArgs)) {
+        const { printCallHelp } = await import('./cli/call-command.js');
         printCallHelp();
         process.exitCode = 0;
         return;
       }
+      const { handleCall: runHandleCall } = await import('./cli/call-command.js');
       await runHandleCall(runtime, resolvedArgs);
       return;
     }
 
     if (resolvedCommand === 'auth') {
       if (consumeHelpTokens(resolvedArgs)) {
-        printAuthHelp();
+        const { printAuthHelp: importedPrintAuthHelp } = await import('./cli/auth-command.js');
+        importedPrintAuthHelp();
         process.exitCode = 0;
         return;
       }
-      await handleAuth(runtime, resolvedArgs);
+      const { handleAuth: importedHandleAuth } = await import('./cli/auth-command.js');
+      await importedHandleAuth(runtime, resolvedArgs);
       return;
     }
-  } finally {
-    const closeStart = Date.now();
-    if (DEBUG_HANG) {
-      logInfo('[debug] beginning runtime.close()');
-      dumpActiveHandles('before runtime.close');
+
+    if (resolvedCommand === 'vault') {
+      if (consumeHelpTokens(resolvedArgs)) {
+        const { printVaultHelp } = await import('./cli/vault-command.js');
+        printVaultHelp();
+        process.exitCode = 0;
+        return;
+      }
+      const { handleVault } = await import('./cli/vault-command.js');
+      await handleVault(runtime, resolvedArgs);
+      return;
     }
-    try {
-      await runtime.close();
-      if (DEBUG_HANG) {
-        const duration = Date.now() - closeStart;
-        logInfo(`[debug] runtime.close() completed in ${duration}ms`);
-        dumpActiveHandles('after runtime.close');
+
+    if (resolvedCommand === 'resource' || resolvedCommand === 'resources') {
+      if (consumeHelpTokens(resolvedArgs)) {
+        const { printResourceHelp } = await import('./cli/resource-command.js');
+        printResourceHelp();
+        process.exitCode = 0;
+        return;
       }
-    } catch (error) {
-      if (DEBUG_HANG) {
-        logError('[debug] runtime.close() failed', error);
+      const { handleResource: importedHandleResource } = await import('./cli/resource-command.js');
+      await importedHandleResource(runtime, resolvedArgs);
+      return;
+    }
+
+    printHelp(`Unknown command '${resolvedCommand}'.`);
+    process.exit(1);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    await closeRuntimeAfterCommand(runtime, { suppressReplayCloseError: primaryError !== undefined });
+  }
+}
+
+async function closeRuntimeAfterCommand(
+  runtime: Runtime,
+  options: { readonly suppressReplayCloseError?: boolean } = {}
+): Promise<void> {
+  const closeStart = Date.now();
+  let closeError: unknown;
+  if (DEBUG_HANG) {
+    logInfo('[debug] beginning runtime.close()');
+    dumpActiveHandles('before runtime.close');
+  }
+  try {
+    await runtime.close();
+    if (DEBUG_HANG) {
+      const duration = Date.now() - closeStart;
+      logInfo(`[debug] runtime.close() completed in ${duration}ms`);
+      dumpActiveHandles('after runtime.close');
+    }
+  } catch (error) {
+    if (DEBUG_HANG) {
+      logError('[debug] runtime.close() failed', error);
+    }
+    if (isReplayModeActive() && !options.suppressReplayCloseError) {
+      closeError = error;
+    }
+  } finally {
+    terminateChildProcesses('runtime.finally');
+    // By default we force an exit after cleanup so Node doesn't hang on lingering stdio handles
+    // (see typescript-sdk#579/#780/#1049). Opt out by exporting MCPORTER_NO_FORCE_EXIT=1.
+    const disableForceExit = process.env.MCPORTER_NO_FORCE_EXIT === '1';
+    const shouldForceExit = !disableForceExit || process.env.MCPORTER_FORCE_EXIT === '1';
+    const scheduleForcedExit = () => {
+      if (shouldForceExit) {
+        setTimeout(flushStdioThenForceExit, FORCE_EXIT_GRACE_MS);
       }
-    } finally {
-      terminateChildProcesses('runtime.finally');
-      // By default we force an exit after cleanup so Node doesn't hang on lingering stdio handles
-      // (see typescript-sdk#579/#780/#1049). Opt out by exporting MCPORTER_NO_FORCE_EXIT=1.
-      const disableForceExit = process.env.MCPORTER_NO_FORCE_EXIT === '1';
-      if (DEBUG_HANG) {
-        dumpActiveHandles('after terminateChildProcesses');
-        if (!disableForceExit || process.env.MCPORTER_FORCE_EXIT === '1') {
-          process.exit(0);
-        }
-      } else {
-        const scheduleExit = () => {
-          if (!disableForceExit || process.env.MCPORTER_FORCE_EXIT === '1') {
-            process.exit(0);
-          }
-        };
-        setImmediate(scheduleExit);
-      }
+    };
+    if (DEBUG_HANG) {
+      dumpActiveHandles('after terminateChildProcesses');
+      scheduleForcedExit();
+    } else {
+      setImmediate(scheduleForcedExit);
     }
   }
-  printHelp(`Unknown command '${resolvedCommand}'.`);
-  process.exit(1);
+  if (closeError) {
+    throw closeError;
+  }
+}
+
+function wrapperArgsBeforeSeparator(args: readonly string[]): string[] {
+  const separatorIndex = args.indexOf('--');
+  return separatorIndex === -1 ? [...args] : args.slice(0, separatorIndex);
 }
 
 // main parses CLI flags and dispatches to list/call commands.
@@ -212,6 +421,7 @@ async function main(): Promise<void> {
 }
 
 if (process.env.MCPORTER_DISABLE_AUTORUN !== '1') {
+  installStdioErrorHandlers();
   main().catch((error) => {
     if (error instanceof CliUsageError) {
       logError(error.message);
@@ -224,11 +434,237 @@ if (process.env.MCPORTER_DISABLE_AUTORUN !== '1') {
   });
 }
 
-async function invokeAuthCommand(runtimeOptions: Parameters<typeof createRuntime>[0], args: string[]): Promise<void> {
+async function invokeAuthCommand(runtimeOptions: RuntimeOptions, args: string[]): Promise<void> {
+  const [{ createRuntime }, { handleAuth: importedHandleAuth }] = await Promise.all([
+    import('./runtime.js'),
+    import('./cli/auth-command.js'),
+  ]);
   const runtime = await createRuntime(runtimeOptions);
   try {
-    await handleAuth(runtime, args);
+    await importedHandleAuth(runtime, args);
   } finally {
     await runtime.close().catch(() => {});
   }
+}
+
+async function maybeHandleDaemonFastCall(
+  command: string,
+  args: string[],
+  configResolution: { path: string; explicit: boolean },
+  rootDir: string | undefined
+): Promise<boolean> {
+  if (isRecordReplayModeActive()) {
+    return false;
+  }
+  const callArgs = resolveDaemonFastCallArgs(command, args);
+  if (!callArgs) {
+    return false;
+  }
+  const server = resolveExplicitCallServer(callArgs);
+  if (!server || !DAEMON_FAST_PATH_SERVERS.has(server) || isFastPathKeepAliveDisabled(server)) {
+    return false;
+  }
+  if (await maybeHandleSimpleDaemonFastCall(callArgs, configResolution, rootDir)) {
+    return true;
+  }
+  const [{ DaemonClient }, { handleCall: importedHandleCall }] = await Promise.all([
+    import('./daemon/client.js'),
+    import('./cli/call-command.js'),
+  ]);
+  const daemonClient = new DaemonClient({
+    configPath: configResolution.path,
+    configExplicit: configResolution.explicit,
+    rootDir,
+  });
+  await importedHandleCall(createDaemonOnlyRuntime(daemonClient), callArgs);
+  return true;
+}
+
+async function maybeHandleSimpleDaemonFastCall(
+  callArgs: string[],
+  configResolution: { path: string; explicit: boolean },
+  rootDir: string | undefined
+): Promise<boolean> {
+  const [{ parseCallArguments }, { resolveCallTimeout }] = await Promise.all([
+    import('./cli/call-arguments.js'),
+    import('./cli/timeouts.js'),
+  ]);
+  let parsed: ReturnType<typeof parseCallArguments>;
+  try {
+    parsed = parseCallArguments([...callArgs]);
+  } catch {
+    return false;
+  }
+  if (
+    !parsed.server ||
+    !parsed.tool ||
+    parsed.ephemeral ||
+    parsed.tailLog ||
+    parsed.saveImagesDir ||
+    (parsed.positionalArgs?.length ?? 0) > 0 ||
+    parsed.schemaStringCoercionCandidates ||
+    parsed.schemaArrayCoercionCandidates
+  ) {
+    return false;
+  }
+
+  const [{ DaemonClient }, { wrapCallResult }, { printCallOutput }] = await Promise.all([
+    import('./daemon/client.js'),
+    import('./result-utils.js'),
+    import('./cli/output-utils.js'),
+  ]);
+  const daemonClient = new DaemonClient({
+    configPath: configResolution.path,
+    configExplicit: configResolution.explicit,
+    rootDir,
+  });
+  const result = await daemonClient.callTool({
+    server: parsed.server,
+    tool: parsed.tool,
+    args: Object.keys(parsed.args).length > 0 ? parsed.args : undefined,
+    timeoutMs: resolveCallTimeout(parsed.timeoutMs),
+    disableOAuth: parsed.disableOAuth,
+  });
+  const { callResult } = wrapCallResult(result);
+  printCallOutput(callResult, result, parsed.output);
+  return true;
+}
+
+function resolveDaemonFastCallArgs(command: string, args: string[]): string[] | undefined {
+  if (command === 'call') {
+    return args;
+  }
+  if (isExplicitNonCallCommand(command) || command.includes('://')) {
+    return undefined;
+  }
+  if (!/[.(]/.test(command)) {
+    return undefined;
+  }
+  return [command, ...args];
+}
+
+function isExplicitNonCallCommand(command: string): boolean {
+  return (
+    command === 'list' ||
+    command === 'auth' ||
+    command === 'resource' ||
+    command === 'resources' ||
+    command === 'daemon' ||
+    command === 'serve' ||
+    command === 'record' ||
+    command === 'replay' ||
+    command === 'config' ||
+    command === 'emit-ts' ||
+    command === 'generate-cli' ||
+    command === 'inspect-cli' ||
+    command === 'describe'
+  );
+}
+
+function resolveExplicitCallServer(args: readonly string[]): string | undefined {
+  let serverFlag: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (!token) {
+      continue;
+    }
+    if (isHelpToken(token)) {
+      return undefined;
+    }
+    if (token === '--http-url' || token === '--stdio') {
+      return undefined;
+    }
+    if (token === '--server') {
+      serverFlag = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--server=')) {
+      serverFlag = token.slice('--server='.length);
+      continue;
+    }
+    if (token.startsWith('-')) {
+      continue;
+    }
+    if (token.includes('://')) {
+      return undefined;
+    }
+    const separator = token.indexOf('.');
+    if (separator > 0) {
+      return token.slice(0, separator);
+    }
+    return serverFlag;
+  }
+  return serverFlag;
+}
+
+function isFastPathKeepAliveDisabled(server: string): boolean {
+  const raw = process.env.MCPORTER_DISABLE_KEEPALIVE ?? process.env.MCPORTER_NO_KEEPALIVE;
+  if (!raw) {
+    return false;
+  }
+  const disabled = new Set(
+    raw
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return disabled.has('*') || disabled.has(server.toLowerCase());
+}
+
+function createDaemonOnlyRuntime(daemonClient: import('./daemon/client.js').DaemonClient): Runtime {
+  return {
+    listServers: () => [],
+    getDefinitions: () => [],
+    getDefinition: (server: string) => {
+      throw new Error(`Server '${server}' is only available through the keep-alive daemon fast path.`);
+    },
+    registerDefinition: () => {
+      throw new Error('Ad-hoc servers are not supported by the keep-alive daemon fast path.');
+    },
+    getInstructions: async () => undefined,
+    listTools: async (server, options) =>
+      (await daemonClient.listTools({
+        server,
+        includeSchema: options?.includeSchema,
+        autoAuthorize: options?.autoAuthorize,
+        allowCachedAuth: options?.allowCachedAuth,
+        disableOAuth: options?.disableOAuth,
+      })) as Awaited<ReturnType<Runtime['listTools']>>,
+    callTool: (server, toolName, options) =>
+      daemonClient.callTool({
+        server,
+        tool: toolName,
+        args: options?.args,
+        timeoutMs: options?.timeoutMs,
+        disableOAuth: options?.disableOAuth,
+      }),
+    listResources: (server, options) => {
+      const params: Record<string, unknown> = { ...options };
+      delete params.allowCachedAuth;
+      delete params.disableOAuth;
+      delete params.oauthSessionOptions;
+      return daemonClient.listResources({
+        server,
+        params,
+        allowCachedAuth: options?.allowCachedAuth,
+        disableOAuth: options?.disableOAuth,
+      });
+    },
+    readResource: (server, uri, options) =>
+      daemonClient.readResource({
+        server,
+        uri,
+        allowCachedAuth: options?.allowCachedAuth,
+        disableOAuth: options?.disableOAuth,
+      }),
+    connect: async (server) => {
+      throw new Error(`Server '${server}' is only available through daemon request methods.`);
+    },
+    close: async (server?: string) => {
+      if (server) {
+        await daemonClient.closeServer({ server }).catch(() => {});
+      }
+    },
+  };
 }

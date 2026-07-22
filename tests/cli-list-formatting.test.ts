@@ -41,7 +41,7 @@ describe('CLI list formatting', () => {
         command: { kind: 'http', url: new URL('https://example.com/mcp') },
       }),
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -94,7 +94,7 @@ describe('CLI list formatting', () => {
         }
         return Promise.reject(new Error('HTTP error 500: upstream unavailable'));
       },
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await handleList(runtime, ['--json']);
     const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
@@ -133,7 +133,7 @@ describe('CLI list formatting', () => {
       getDefinitions: () => [definition],
       getDefinition: () => definition,
       registerDefinition: vi.fn(),
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -148,6 +148,195 @@ describe('CLI list formatting', () => {
     metadataSpy.mockRestore();
   });
 
+  it('emits JSON schemas for configured HTTP servers listed by name', async () => {
+    const { handleList } = await cliModulePromise;
+    const toolCache = await import('../src/cli/tool-cache.js');
+    const metadata = [
+      {
+        tool: {
+          name: 'check_login_status',
+          description: 'Check login status',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        methodName: 'check_login_status',
+        options: [],
+      },
+    ];
+    const metadataSpy = vi.spyOn(toolCache, 'loadToolMetadata').mockResolvedValue(metadata as never);
+    const definition: ServerDefinition = {
+      name: 'xhs',
+      command: { kind: 'http', url: new URL('http://127.0.0.1:18060/mcp') },
+      source: { kind: 'local', path: '<test>' },
+    };
+    const registerDefinition = vi.fn();
+    const runtime = {
+      getDefinitions: () => [definition],
+      getDefinition: () => definition,
+      registerDefinition,
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleList(runtime, ['xhs', '--schema', '--json']);
+
+    const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
+    expect(payload).toMatchObject({
+      mode: 'server',
+      name: 'xhs',
+      status: 'ok',
+      tools: [{ name: 'check_login_status', inputSchema: { type: 'object', properties: {} } }],
+    });
+    expect(registerDefinition).not.toHaveBeenCalled();
+
+    logSpy.mockRestore();
+    metadataSpy.mockRestore();
+  });
+
+  it('surfaces initialize instructions in single server text and JSON output', async () => {
+    const { handleList } = await cliModulePromise;
+    const definition: ServerDefinition = {
+      name: 'immich',
+      description: 'Immich MCP',
+      command: { kind: 'http', url: new URL('https://example.com/mcp') },
+    };
+    const runtime = {
+      getDefinitions: () => [definition],
+      getDefinition: () => definition,
+      listTools: vi.fn().mockResolvedValue([{ name: 'search_assets' }]),
+      getInstructions: vi.fn().mockResolvedValue('Use asset IDs from search results when calling mutation tools.'),
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleList(runtime, ['immich']);
+    let lines = logSpy.mock.calls.map((call) => stripAnsi(call.join(' ')));
+    expect(lines.some((line) => line.includes('Instructions: Use asset IDs from search results'))).toBe(true);
+
+    logSpy.mockClear();
+    await handleList(runtime, ['--json', 'immich']);
+    const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
+    expect(payload.instructions).toBe('Use asset IDs from search results when calling mutation tools.');
+
+    logSpy.mockRestore();
+  });
+
+  it('prints compact signatures for single server listings with --brief', async () => {
+    const { handleList } = await cliModulePromise;
+    const listToolsSpy = vi.fn((_name: string, options?: { includeSchema?: boolean }) =>
+      Promise.resolve([buildLinearDocumentsTool(options?.includeSchema)])
+    );
+    const runtime = {
+      getDefinitions: () => [linearDefinition],
+      getDefinition: () => linearDefinition,
+      listTools: listToolsSpy,
+      getInstructions: vi.fn().mockResolvedValue('Use Linear IDs from list operations in mutation tools.'),
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleList(runtime, ['linear', '--brief']);
+
+    const lines = logSpy.mock.calls.map((call) => stripAnsi(call.join(' ')));
+    expect(lines.some((line) => line.includes('Instructions: Use Linear IDs'))).toBe(true);
+    expect(lines.some((line) => line.trim().startsWith('/**'))).toBe(false);
+    expect(lines.some((line) => line.includes('Examples:'))).toBe(false);
+    expect(lines.some((line) => line.includes('@param'))).toBe(false);
+    expect(lines.some((line) => line.includes('function list_documents('))).toBe(true);
+    expect(
+      lines.some((line) => line.includes('// optional (4): projectId, initiativeId, creatorId, includeArchived'))
+    ).toBe(true);
+    expect(
+      lines.some((line) => line.includes('Optional parameters hidden; run with --all-parameters to view all fields'))
+    ).toBe(true);
+    expect(listToolsSpy).toHaveBeenCalledWith('linear', expect.objectContaining({ includeSchema: true }));
+
+    logSpy.mockRestore();
+  });
+
+  it('prints compact signatures for selected tools with --signatures', async () => {
+    const { handleList } = await cliModulePromise;
+    const listToolsSpy = vi.fn((_name: string, options?: { includeSchema?: boolean }) =>
+      Promise.resolve([
+        buildLinearDocumentsTool(options?.includeSchema),
+        {
+          name: 'create_comment',
+          description: 'Create a comment on a specific Linear issue',
+          inputSchema: options?.includeSchema
+            ? {
+                type: 'object',
+                properties: {
+                  issueId: { type: 'string', description: 'The issue ID' },
+                  body: { type: 'string', description: 'Comment body as Markdown' },
+                },
+                required: ['issueId', 'body'],
+              }
+            : undefined,
+        },
+      ])
+    );
+    const runtime = {
+      getDefinitions: () => [linearDefinition],
+      getDefinition: () => linearDefinition,
+      listTools: listToolsSpy,
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleList(runtime, ['linear.create_comment', '--signatures']);
+
+    const lines = logSpy.mock.calls.map((call) => stripAnsi(call.join(' ')));
+    expect(lines.some((line) => line.includes('function create_comment('))).toBe(true);
+    expect(lines.some((line) => line.includes('function list_documents('))).toBe(false);
+    expect(lines.some((line) => line.includes('Examples:'))).toBe(false);
+    expect(lines.find((line) => line.includes('HTTP https://example.com/mcp'))).toMatch(/1 tool/);
+
+    logSpy.mockRestore();
+  });
+
+  it('prints only the selected tool when listing server.tool with schemas', async () => {
+    const { handleList } = await cliModulePromise;
+    const listToolsSpy = vi.fn((_name: string, options?: { includeSchema?: boolean }) =>
+      Promise.resolve([
+        {
+          name: 'add',
+          description: 'Add numbers',
+          inputSchema: options?.includeSchema
+            ? { type: 'object', properties: { a: { type: 'number' } }, required: ['a'] }
+            : undefined,
+          outputSchema: { type: 'number' },
+        },
+        {
+          name: 'subtract',
+          description: 'Subtract numbers',
+          inputSchema: options?.includeSchema
+            ? { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] }
+            : undefined,
+        },
+      ])
+    );
+    const definition: ServerDefinition = {
+      name: 'calculator',
+      description: 'Math tools',
+      command: { kind: 'http', url: new URL('https://example.com/mcp') },
+    };
+    const runtime = {
+      getDefinitions: () => [definition],
+      getDefinition: () => definition,
+      listTools: listToolsSpy,
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await handleList(runtime, ['calculator.add', '--schema']);
+
+    const lines = logSpy.mock.calls.map((call) => stripAnsi(call.join(' ')));
+    expect(lines.some((line) => line.includes('function add('))).toBe(true);
+    expect(lines.some((line) => line.includes('function subtract('))).toBe(false);
+    expect(lines.some((line) => line.includes('"properties"'))).toBe(true);
+    expect(lines.find((line) => line.includes('HTTP https://example.com/mcp'))).toMatch(/1 tool/);
+    expect(listToolsSpy).toHaveBeenCalledWith('calculator', expect.objectContaining({ includeSchema: true }));
+
+    logSpy.mockRestore();
+  });
+
   it('summarizes hidden optional parameters and hints include flag', async () => {
     const { handleList } = await cliModulePromise;
     const listToolsSpy = vi.fn((_name: string, options?: { includeSchema?: boolean }) =>
@@ -156,7 +345,7 @@ describe('CLI list formatting', () => {
     const runtime = {
       getDefinition: () => linearDefinition,
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -183,7 +372,7 @@ describe('CLI list formatting', () => {
     const runtime = {
       getDefinition: () => linearDefinition,
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -224,7 +413,7 @@ describe('CLI list formatting', () => {
     const runtime = {
       getDefinition: () => linearDefinition,
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -247,7 +436,7 @@ describe('CLI list formatting', () => {
     const runtime = {
       getDefinition: () => linearDefinition,
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -306,7 +495,7 @@ describe('CLI list formatting', () => {
     const runtime = {
       getDefinition: () => linearDefinition,
       listTools: listToolsSpy,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);

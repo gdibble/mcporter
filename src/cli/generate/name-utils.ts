@@ -167,8 +167,7 @@ function deriveNameFromUrl(url: URL): string | undefined {
       return last;
     }
   }
-  const segments = url.pathname.split('/').filter(Boolean);
-  const firstSegment = segments[0];
+  const firstSegment = url.pathname.split('/').find(Boolean);
   if (firstSegment) {
     return firstSegment.replace(/[^a-zA-Z0-9-_]/g, '-');
   }

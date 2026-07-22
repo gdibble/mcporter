@@ -1,12 +1,13 @@
 # MCPorter 🧳 - Call MCPs from TypeScript or as CLI
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/steipete/mcporter/main/mcporter.png" alt="MCPorter header banner" width="1100">
+  <img src="https://raw.githubusercontent.com/openclaw/mcporter/main/mcporter.png" alt="MCPorter header banner" width="1100">
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/mcporter"><img src="https://img.shields.io/npm/v/mcporter?style=for-the-badge&logo=npm&logoColor=white" alt="npm version"></a>
-  <a href="https://github.com/steipete/mcporter/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/steipete/mcporter/ci.yml?branch=main&style=for-the-badge&label=tests" alt="CI Status"></a>
-  <a href="https://github.com/steipete/mcporter"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Platforms"></a>
+  <a href="https://github.com/openclaw/mcporter/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/openclaw/mcporter/ci.yml?branch=main&style=for-the-badge&label=tests" alt="CI Status"></a>
+  <a href="https://github.com/openclaw/mcporter"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Platforms"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
 </p>
 
@@ -16,16 +17,26 @@ MCPorter helps you lean into the "code execution" workflows highlighted in Anthr
 
 ## Key Capabilities
 
-- **Zero-config discovery.** `createRuntime()` merges your home config (`~/.mcporter/mcporter.json[c]`) first, then `config/mcporter.json`, plus Cursor/Claude/Codex/Windsurf/OpenCode/VS Code imports, expands `${ENV}` placeholders, and pools connections so you can reuse transports across multiple calls.
+- **Zero-config discovery.** `createRuntime()` merges your home config (`~/.mcporter/mcporter.json[c]`, or `$XDG_CONFIG_HOME/mcporter/mcporter.json[c]` when set) first, then `config/mcporter.json`, plus Cursor/Claude/Codex/Windsurf/OpenCode/VS Code imports, expands `${ENV}` placeholders, and pools connections so you can reuse transports across multiple calls.
 - **One-command CLI generation.** `mcporter generate-cli` turns any MCP server definition into a ready-to-run CLI, with optional bundling/compilation and metadata for easy regeneration.
 - **Typed tool clients.** `mcporter emit-ts` emits `.d.ts` interfaces or ready-to-run client wrappers so agents/tests can call MCP servers with strong TypeScript types without hand-writing plumbing.
 - **Friendly composable API.** `createServerProxy()` exposes tools as ergonomic camelCase methods, automatically applies JSON-schema defaults, validates required arguments, and hands back a `CallResult` with `.text()`, `.markdown()`, `.json()`, `.images()`, and `.content()` helpers.
+- **Record/replay fixtures.** `mcporter record` captures MCP JSON-RPC traffic as NDJSON, and `mcporter replay` serves the same responses deterministically for offline debugging and redacted repros.
 - **OAuth and stdio ergonomics.** Built-in OAuth caching, log tailing, and stdio wrappers let you work with HTTP, SSE, and stdio transports from the same interface.
-- **Ad-hoc connections.** Point the CLI at *any* MCP endpoint (HTTP or stdio) without touching config, then persist it later if you want. Hosted MCPs that expect a browser login (Supabase, Vercel, etc.) are auto-detected—just run `mcporter auth <url>` and the CLI promotes the definition to OAuth on the fly. See [docs/adhoc.md](docs/adhoc.md).
+- **Ad-hoc connections.** Point the CLI at _any_ MCP endpoint (HTTP or stdio) without touching config, then persist it later if you want. Hosted MCPs that expect a browser login (Supabase, Vercel, etc.) are auto-detected—just run `mcporter auth <url>` and the CLI promotes the definition to OAuth on the fly. See [docs/adhoc.md](docs/adhoc.md).
+
+## What's New in 0.11.0
+
+- **Bridge mode.** `mcporter serve` exposes daemon-managed keep-alive servers as one MCP bridge with readable `server__tool` names.
+- **Headless OAuth.** `--no-browser`, vault seeding, cached-token refresh, and `auth: "refreshable_bearer"` cover non-interactive deployments.
+- **HTTP compatibility.** `httpFetch: "node-http1"` keeps providers that reject Node's built-in `fetch` working.
+- **Safer writes.** Config, OAuth vault, JSON output, and cache metadata writes are serialized/atomic so parallel agents stop stepping on each other.
+- **Release confidence.** `0.11.0` is published on npm and Homebrew, and live/published install smokes are green.
 
 ## Quick Start
 
 MCPorter auto-discovers the MCP servers you already configured in Cursor, Claude Code/Desktop, Codex, or local overrides. You can try it immediately with `npx`--no installation required. Need a full command reference (flags, modes, return types)? Check out [docs/cli-reference.md](docs/cli-reference.md).
+
 ### Call syntax options
 
 ```bash
@@ -39,7 +50,6 @@ npx mcporter call 'linear.create_comment(issueId: "ENG-123", body: "Looks good!"
 npx mcporter call server.tool -- --raw-value
 ```
 
-
 ### List your MCP servers
 
 ```bash
@@ -51,6 +61,7 @@ npx mcporter list --stdio "bun run ./local-server.ts" --env TOKEN=xyz
 ```
 
 - Add `--json` to emit a machine-readable summary with per-server statuses (auth/offline/http/error counts) and, for single-server runs, the full tool schema payload.
+- Add `--status` for a concise single-server status check without tool docs, `--exit-code` to fail when any checked server is unhealthy, or `--quiet` for silent health gates.
 - Add `--verbose` to show every config source that registered the server name (primary first), both in text and JSON list output.
 
 You can now point `mcporter list` at ad-hoc servers: provide a URL directly or use the new `--http-url/--stdio` flags (plus `--env`, `--cwd`, `--name`, or `--persist`) to describe any MCP endpoint. Until you persist that definition, you still need to repeat the same URL/stdio flags for `mcporter call`—the printed slug only becomes reusable once you merge it into a config via `--persist` or `mcporter config add` (use `--scope home|project` to pick the write target). Follow up with `mcporter auth https://…` (or the same flag set) to finish OAuth without editing config. Full details live in [docs/adhoc.md](docs/adhoc.md).
@@ -117,8 +128,8 @@ Required parameters always show; optional parameters stay hidden unless (a) ther
 ### Context7: fetch docs (no auth required)
 
 ```bash
-npx mcporter call context7.resolve-library-id libraryName=react
-npx mcporter call context7.get-library-docs context7CompatibleLibraryID=/websites/react_dev topic=hooks
+npx mcporter call context7.resolve-library-id query="React hooks docs" libraryName=react
+npx mcporter call context7.query-docs libraryId=/reactjs/react.dev query="useEffect cleanup"
 ```
 
 ### Linear: search documentation (requires `LINEAR_API_KEY`)
@@ -132,6 +143,7 @@ LINEAR_API_KEY=sk_linear_example npx mcporter call linear.search_documentation q
 ```bash
 npx mcporter call chrome-devtools.take_snapshot
 npx mcporter call 'linear.create_comment(issueId: "LNR-123", body: "Hello world")'
+npx mcporter call linear.create_comment issueId=LNR-123 body=@comment.md
 npx mcporter call https://mcp.linear.app/mcp.list_issues assignee=me
 npx mcporter call shadcn.io/api/mcp.getComponent component=vortex   # protocol optional; defaults to https
 npx mcporter call linear.listIssues --tool listIssues   # auto-corrects to list_issues
@@ -152,10 +164,13 @@ Helpful flags:
 - `--save-images <dir>` (on `mcporter call`) -- save MCP image content blocks to files in the given directory (opt-in; stdout output shape stays unchanged).
 - `--raw-strings` (on `mcporter call`) -- keep numeric-looking argument values (for `key=value`, `key:value`, and trailing positional values) as strings.
 - `--no-coerce` (on `mcporter call`) -- keep all `key=value` and positional values as raw strings (disables bool/null/number/JSON coercion).
+- `key=@path` / `--key @path` (on `mcporter call`) -- read a named argument as exact UTF-8 text from a file; use `@@` for a literal leading `@`.
 - `--` (on `mcporter call`) -- stop flag parsing so the remaining tokens stay literal positional values, even when they start with `--`.
 - `--json` (on `mcporter list`) -- emit JSON summaries/counts instead of text. Multi-server runs report per-server statuses, counts, and connection issues; single-server runs include the full tool metadata.
+- `--status`, `--exit-code`, `--quiet` (on `mcporter list`) -- run concise server health checks through the existing list flow; `--quiet` suppresses output and exits 1 if anything checked is unhealthy.
 - `--output json/raw` (on `mcporter call`) -- when a connection fails, MCPorter prints the usual colorized hint and also emits a structured `{ server, tool, issue }` envelope so scripts can handle auth/offline/http errors programmatically.
-- `--json` (on `mcporter auth`) -- emit the same structured connection envelope whenever OAuth/transport setup fails, instead of throwing an error.
+- `--json` (on `mcporter auth`) -- emit the same structured connection envelope whenever OAuth/transport setup fails, instead of throwing an error. With `--no-browser`, it emits auth-start JSON containing `authorizationUrl` and `redirectUrl`.
+- `--no-browser` / `--browser none` (on `mcporter auth` or `mcporter config login`) -- suppress browser launch and print the OAuth authorization URL for headless workflows; `MCPORTER_OAUTH_NO_BROWSER=1` / `true` / `yes` enables the same behavior.
 - `--json` (on `mcporter emit-ts`) -- print a JSON summary describing the emitted files (mode + output paths) instead of text logs—handy when generating artifacts inside scripts.
 - `--all-parameters` -- show every schema field when listing a server (default output shows at least five parameters plus a summary of the rest).
 - `--http-url <https://…>` / `--stdio "command …"` -- describe an ad-hoc MCP server inline. STDIO transports now inherit your current shell environment automatically; add `--env KEY=value` only when you need to inject/override variables alongside `--cwd`, `--name`, or `--persist <config.json>`. These flags now work with `mcporter auth` too, so `mcporter auth https://mcp.example.com/mcp` just works.
@@ -163,7 +178,7 @@ Helpful flags:
 
 > Tip: You can skip the verb entirely—`mcporter firecrawl` automatically runs `mcporter list firecrawl`, and dotted tokens like `mcporter linear.list_issues` dispatch to the call command (typo fixes included).
 
-Timeouts default to 30 s; override with `MCPORTER_LIST_TIMEOUT` or `MCPORTER_CALL_TIMEOUT` when you expect slow startups. OAuth browser handshakes get a separate 60 s grace period; pass `--oauth-timeout <ms>` (or export `MCPORTER_OAUTH_TIMEOUT_MS`) when you need the CLI to bail out faster while you diagnose stubborn auth flows.
+Server listings default to a 30 s timeout, while calls default to 60 s. Override call timeouts with `MCPORTER_CALL_TIMEOUT` or `--timeout`, and list timeouts with `MCPORTER_LIST_TIMEOUT`. OAuth browser handshakes get a separate 5 minute grace period; pass `--oauth-timeout <ms>` (or export `MCPORTER_OAUTH_TIMEOUT_MS`) when you need the CLI to bail out faster while you diagnose stubborn auth flows.
 
 ### Try an MCP without editing config
 
@@ -186,18 +201,17 @@ npx mcporter call --stdio "bun run ./local-server.ts" --name local-tools
 - Stop it anytime with `mcporter daemon stop`, pre-warm with `mcporter daemon start`, or bounce it via `mcporter daemon restart` after tweaking configs/env.
 - All other servers stay ephemeral; add `"lifecycle": "keep-alive"` to a server entry (or set `MCPORTER_KEEPALIVE=name`) when you want the daemon to manage it. You can also set `"lifecycle": "ephemeral"` (or `MCPORTER_DISABLE_KEEPALIVE=name`) to opt out.
 - The daemon only manages named servers that come from your config/imports. Ad-hoc STDIO/HTTP targets invoked via `--stdio …`, `--http-url …`, or inline function-call syntax remain per-process today; persist them into `config/mcporter.json` (or use `--persist`) if you need them to participate in the shared daemon.
+- `mcporter serve --stdio` exposes every daemon-managed keep-alive server as one MCP stdio bridge for clients such as Claude Code or Codex. Register it once, then call namespaced tools like `chrome-devtools__list_pages`; add `--servers a,b` to limit the bridge or `--http <port>` to serve Streamable HTTP on localhost at `/mcp`. HTTP mode also exposes `/mcp/<server>` for one selected keep-alive server with its original, unprefixed tool names.
 - Troubleshooting? Run `mcporter daemon start --log` (or `--log-file /tmp/daemon.log`) to tee stdout/stderr into a file, and add `--log-servers chrome-devtools` when you only want call traces for a specific MCP. Per-server configs can also set `"logging": { "daemon": { "enabled": true } }` to force detailed logging for that entry.
-
 
 ## Friendlier Tool Calls
 
-- **Function-call syntax.** Instead of juggling `--flag value`, you can call tools as `mcporter call 'linear.create_issue(title: "Bug", team: "ENG")'`. The parser supports nested objects/arrays, lets you omit labels when you want to rely on schema order (e.g. `mcporter 'context7.resolve-library-id("react")'`), and surfaces schema validation errors clearly. Deep dive in [docs/call-syntax.md](docs/call-syntax.md).
+- **Function-call syntax.** Instead of juggling `--flag value`, you can call tools as `mcporter call 'linear.create_issue(title: "Bug", team: "ENG")'`. The parser supports nested objects/arrays, lets you omit labels when you want to rely on schema order (e.g. `mcporter 'context7.resolve-library-id("React hooks docs", "react")'`), and surfaces schema validation errors clearly. Deep dive in [docs/call-syntax.md](docs/call-syntax.md).
 - **Flag shorthand still works.** Prefer CLI-style arguments? Stick with `mcporter linear.create_issue title=value team=value`, `title=value`, `title:value`, or even `title: value`—the CLI now normalizes all three forms.
 - **Unknown long flags fail fast.** `mcporter call server.tool --source import` now errors instead of silently turning `--source` into a positional tool argument. Use `source=import`, `--args '{"source":"import"}'`, or insert `--` before literal positional values that begin with `--`.
 - **Cheatsheet.** See [docs/tool-calling.md](docs/tool-calling.md) for a quick comparison of every supported call style (auto-inferred verbs, flags, function-calls, and ad-hoc URLs).
 - **Auto-correct.** If you typo a tool name, MCPorter inspects the server’s tool catalog, retries when the edit distance is tiny, and otherwise prints a `Did you mean …?` hint. The heuristic (and how to tune it) is captured in [docs/call-heuristic.md](docs/call-heuristic.md).
-- **Richer single-server output.** `mcporter list <server>` now prints TypeScript-style signatures, inline comments, return-shape hints, and command examples that mirror the new call syntax. Optional parameters stay hidden by default—add `--all-parameters` or `--schema` whenever you need the full JSON schema.
-
+- **Richer single-server output.** `mcporter list <server>` now prints TypeScript-style signatures, inline comments, return-shape hints, and command examples that mirror the new call syntax. Optional parameters stay hidden by default—add `--all-parameters` or `--schema` whenever you need the full JSON schema. Prefer a tighter scan? `mcporter list <server> --brief` (or `--signatures`) keeps just the compact signatures and optional summaries.
 
 ## Installation
 
@@ -213,6 +227,12 @@ npx mcporter list
 pnpm add mcporter
 ```
 
+### Install globally with npm
+
+```bash
+npm install -g mcporter
+```
+
 ### Homebrew (steipete/tap)
 
 ```bash
@@ -220,34 +240,34 @@ brew tap steipete/tap
 brew install steipete/tap/mcporter
 ```
 
-> The tap publishes alongside MCPorter 0.3.2. If you run into issues with an older tap install, run `brew update` before reinstalling.
+> The tap publishes alongside npm. If you run into issues with an older tap install, run `brew update` before reinstalling.
 
 ## One-shot calls from code
 
 ```ts
-import { callOnce } from "mcporter";
+import { callOnce } from 'mcporter';
 
 const result = await callOnce({
-	server: "firecrawl",
-	toolName: "crawl",
-	args: { url: "https://anthropic.com" },
+  server: 'firecrawl',
+  toolName: 'crawl',
+  args: { url: 'https://anthropic.com' },
 });
 
 console.log(result); // raw MCP envelope
 ```
 
-`callOnce` automatically discovers the selected server (including Cursor/Claude/Codex/Windsurf/OpenCode/VS Code imports), handles OAuth prompts, and closes transports when it finishes. It is ideal for manual runs or wiring MCPorter directly into an agent tool hook.
+`callOnce` automatically discovers the selected server (including Cursor/Claude/Codex/Windsurf/OpenCode/VS Code imports), handles OAuth prompts, and closes transports when it finishes. It is ideal for manual runs or wiring MCPorter directly into an agent tool hook. In headless contexts, pass `disableOAuth: true` to suppress interactive OAuth and rely on cached tokens only — the library equivalent of the CLI's `--no-oauth` flag.
 
 ## Compose Automations with the Runtime
 
 ```ts
-import { createRuntime } from "mcporter";
+import { createRuntime } from 'mcporter';
 
 const runtime = await createRuntime();
 
-const tools = await runtime.listTools("context7");
-const result = await runtime.callTool("context7", "resolve-library-id", {
-	args: { libraryName: "react" },
+const tools = await runtime.listTools('context7');
+const result = await runtime.callTool('context7', 'resolve-library-id', {
+  args: { query: 'React hooks docs', libraryName: 'react' },
 });
 
 console.log(result); // prints JSON/text automatically because the CLI pretty-prints by default
@@ -261,18 +281,18 @@ Reach for `createRuntime()` when you need connection pooling, repeated calls, or
 The runtime API is built for agents and scripts, not just humans at a terminal.
 
 ```ts
-import { createRuntime, createServerProxy } from "mcporter";
+import { createRuntime, createServerProxy } from 'mcporter';
 
 const runtime = await createRuntime();
-const chrome = createServerProxy(runtime, "chrome-devtools");
-const linear = createServerProxy(runtime, "linear");
+const chrome = createServerProxy(runtime, 'chrome-devtools');
+const linear = createServerProxy(runtime, 'linear');
 
 const snapshot = await chrome.takeSnapshot();
 console.log(snapshot.text());
 
 const docs = await linear.searchDocumentation({
-	query: "automations",
-	page: 0,
+  query: 'automations',
+  page: 0,
 });
 console.log(docs.json());
 ```
@@ -285,8 +305,7 @@ Friendly ergonomics baked into the proxy and result helpers:
 
 Drop down to `runtime.callTool()` whenever you need explicit control over arguments, metadata, or streaming options.
 
-
-Call `mcporter list <server>` any time you need the TypeScript-style signature, optional parameter hints, and sample invocations that match the CLI's function-call syntax.
+Call `mcporter list <server>` any time you need the TypeScript-style signature, optional parameter hints, and sample invocations that match the CLI's function-call syntax. Add `--brief` or `--signatures` when you only want compact signatures.
 
 ## Generate a Standalone CLI
 
@@ -327,6 +346,10 @@ npx mcporter inspect-cli dist/context7.js     # human-readable summary
 npx mcporter generate-cli --from dist/context7.js  # replay with latest mcporter
 ```
 
+Agents should usually get one small skill per MCP server or workflow instead of
+a generic "all of mcporter" skill. See [docs/agent-skills.md](docs/agent-skills.md)
+for the pattern and a copyable template.
+
 ## Generate Typed Clients
 
 Use `mcporter emit-ts` when you want strongly typed tooling without shipping a full CLI. It reuses the same signatures/doc blocks as `mcporter list`, so the generated headers stay in sync with what the CLI shows.
@@ -365,30 +388,100 @@ Run `mcporter config …` via your package manager (pnpm, npm, npx, etc.) when y
 
 ```jsonc
 {
-	"mcpServers": {
-		"context7": {
-			"description": "Context7 docs MCP",
-			"baseUrl": "https://mcp.context7.com/mcp",
-			"headers": {
-				"Authorization": "$env:CONTEXT7_API_KEY"
-			}
-		},
-		"chrome-devtools": {
-			"command": "npx",
-			"args": ["-y", "chrome-devtools-mcp@latest"],
-			"env": { "npm_config_loglevel": "error" }
-		}
-	},
-	"imports": ["cursor", "claude-code", "claude-desktop", "codex", "windsurf", "opencode", "vscode"]
+  "mcpServers": {
+    "context7": {
+      "description": "Context7 docs MCP",
+      "baseUrl": "https://mcp.context7.com/mcp",
+      "headers": {
+        "Authorization": "$env:CONTEXT7_API_KEY",
+      },
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect"],
+      "env": { "npm_config_loglevel": "error" },
+    },
+  },
+  "imports": ["cursor", "claude-code", "claude-desktop", "codex", "windsurf", "opencode", "vscode"],
 }
 ```
 
 What MCPorter handles for you:
 
-- `${VAR}`, `${VAR:-fallback}`, and `$env:VAR` interpolation for headers and env entries.
-- Automatic OAuth token caching under `~/.mcporter/<server>/` unless you override `tokenCacheDir`.
+- `${VAR}`, `${VAR:-fallback}`, and `$env:VAR` interpolation for config strings. Secret-bearing `headers`, `env`, and bearer-token placeholders stay lazy and resolve at runtime.
+- Automatic OAuth token caching in the shared vault (`~/.mcporter/credentials.json`, or `$XDG_DATA_HOME/mcporter/credentials.json` when set) unless you override `tokenCacheDir`.
 - Stdio commands inherit the directory of the file that defined them (imports or local config).
 - Import precedence matches the array order; omit `imports` to use the default `["cursor", "claude-code", "claude-desktop", "codex", "windsurf", "opencode", "vscode"]`.
+- `chrome-devtools-mcp --autoConnect` receives a small compatibility patch while upstream auto-connect can hang on busy Chrome profiles; set `MCPORTER_DISABLE_CHROME_DEVTOOLS_COMPAT=1` to opt out.
+
+#### OAuth-protected servers
+
+If an HTTP MCP requires browser login (OAuth), persist it with `--auth oauth` (or set `"auth": "oauth"` in JSON), then run `mcporter auth` once:
+
+```bash
+npx mcporter config add notion https://mcp.notion.com/mcp --auth oauth
+npx mcporter auth notion
+```
+
+On headless hosts, use `npx mcporter auth notion --no-browser` to print the authorization URL instead of launching the platform browser. Treat the printed URL as sensitive operational output. Keep the `mcporter auth` process alive until the browser redirects back to the printed `redirectUrl`; process managers that exit or clean up the command after capturing stdout can kill the loopback callback listener before OAuth completes. Run the command from a persistent terminal session, `tmux`, or a supervised background process such as `nohup`, and if you open the URL on another machine, make sure the callback port is reachable through a loopback-only tunnel or a configured `oauthRedirectUrl`.
+
+Providers that do not support dynamic client registration can use a pre-registered app:
+
+```jsonc
+{
+  "mcpServers": {
+    "hubspot": {
+      "baseUrl": "https://mcp.hubspot.com/mcp",
+      "auth": "oauth",
+      "oauthClientId": "your-client-id",
+      "oauthClientSecretEnv": "HUBSPOT_CLIENT_SECRET",
+      "oauthTokenEndpointAuthMethod": "client_secret_post",
+      "oauthRedirectUrl": "http://127.0.0.1:3434/callback",
+    },
+  },
+}
+```
+
+Keep client secrets in environment variables or private machine-local configs,
+and register the exact `oauthRedirectUrl` with the provider.
+
+#### Refreshable bearer tokens (non-interactive OAuth)
+
+For servers with pre-seeded OAuth tokens that need automatic refresh without browser prompts, use `auth: "refreshable_bearer"`. HTTP servers receive `Authorization: Bearer <token>` headers; STDIO servers require `refresh.accessTokenEnv` to inject the token as an environment variable:
+
+```jsonc
+{
+  "mcpServers": {
+    "example": {
+      "command": "uvx",
+      "args": ["example-mcp-server"],
+      "auth": "refreshable_bearer",
+      "refresh": {
+        "tokenEndpoint": "https://api.example.com/oauth/token",
+        "clientIdEnv": "EXAMPLE_CLIENT_ID",
+        "clientSecretEnv": "EXAMPLE_CLIENT_SECRET",
+        "clientAuthMethod": "client_secret_basic",
+        "refreshSkewSeconds": 300,
+        "accessTokenEnv": "EXAMPLE_ACCESS_TOKEN",
+      },
+    },
+  },
+}
+```
+
+mcporter refreshes tokens before they expire (default 5 minutes early) using the refresh token from the vault. For keep-alive stdio servers that can't reload credentials after startup, use `"lifecycle": "ephemeral"` or restart the daemon before tokens expire.
+
+Headless deployments that already have OAuth tokens can seed the vault without
+reproducing mcporter's internal vault key:
+
+```bash
+npx mcporter vault set hubspot --tokens-file ./tokens.json
+npx mcporter vault set hubspot --stdin < tokens.json
+npx mcporter vault clear hubspot
+```
+
+The JSON payload is `{ "tokens": { ... }, "clientInfo": { ... } }`; `tokens`
+is required and `clientInfo` is optional.
 
 Provide `configPath` or `rootDir` to CLI/runtime calls when you juggle multiple config files side by side.
 
@@ -399,7 +492,7 @@ mcporter reads exactly one primary config per run. The lookup order is:
 1. The path you pass via `--config` (or programmatic `configPath`).
 2. The `MCPORTER_CONFIG` environment variable (set it in your shell to apply everywhere).
 3. `<root>/config/mcporter.json` inside the current project.
-4. `~/.mcporter/mcporter.json` or `~/.mcporter/mcporter.jsonc` if the project file is missing.
+4. `$XDG_CONFIG_HOME/mcporter/mcporter.json[c]` when `XDG_CONFIG_HOME` is set, falling back to `~/.mcporter/mcporter.json[c]` when no XDG mcporter config exists and the project file is missing.
 
 All `mcporter config …` mutations write back to whichever file was selected by that order. To manage a system-wide config explicitly, point the CLI at it:
 
@@ -409,17 +502,41 @@ mcporter config --config ~/.mcporter/mcporter.json add global-server https://api
 
 Set `MCPORTER_CONFIG=~/.mcporter/mcporter.json` in your shell profile when you want that file to be the default everywhere (handy for `npx mcporter …` runs).
 
+mcporter honors XDG Base Directory env vars for its own files when those vars are explicitly set: `XDG_CONFIG_HOME` for home configs, `XDG_DATA_HOME` for the OAuth vault, `XDG_CACHE_HOME` for schema caches, and `XDG_STATE_HOME` for daemon/runtime state. If the matching XDG var is unset or relative, mcporter keeps the legacy `~/.mcporter` path. Config discovery is XDG-first but still probes `~/.mcporter/mcporter.json[c]` when no XDG mcporter config exists, which keeps embedders from hiding the user registry when they set `XDG_CONFIG_HOME` for another tool. Existing explicit overrides still win.
+
+### Tool Filtering
+
+Server definitions can hide or block exact tool names with either `allowedTools` or `blockedTools`:
+
+```jsonc
+{
+  "mcpServers": {
+    "slack-readonly": {
+      "baseUrl": "https://example.com/slack/mcp",
+      "allowedTools": ["channels_list", "conversations_history"],
+    },
+    "filesystem-safe": {
+      "command": "npx -y @modelcontextprotocol/server-filesystem ~/Downloads",
+      "blockedTools": ["write_file", "delete_file", "move_file"],
+    },
+  },
+}
+```
+
+`allowedTools` is an allowlist: only listed tools appear in `mcporter list` and can be called. An empty array blocks every tool. `blockedTools` is a blocklist: listed tools are hidden and rejected by `mcporter call`. Use exact tool names only, and choose one mode per server.
+
 ## Testing and CI
 
-| Command | Purpose |
-| --- | --- |
-| `pnpm check` | Biome formatting plus Oxlint/tsgolint gate. |
-| `pnpm build` | TypeScript compilation (emits `dist/`). |
-| `pnpm test` | Vitest unit and integration suites (streamable HTTP fixtures included). |
+| Command      | Purpose                                                                 |
+| ------------ | ----------------------------------------------------------------------- |
+| `pnpm check` | Oxfmt formatting plus Oxlint/tsgolint gate.                             |
+| `pnpm build` | TypeScript compilation (emits `dist/`).                                 |
+| `pnpm test`  | Vitest unit and integration suites (streamable HTTP fixtures included). |
 
 CI runs the same trio via GitHub Actions.
 
 ## Related
+
 - CodexBar 🟦🟩 Keep Codex token windows visible in your macOS menu bar. <https://codexbar.app>.
 - Trimmy ✂️ “Paste once, run once.” Flatten multi-line shell snippets so they paste and run. <https://trimmy.app>.
 - Oracle 🧿 Prompt bundler/CLI for multi-model runs (GPT-5.1, Claude, Gemini). <https://github.com/steipete/oracle>.

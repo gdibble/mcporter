@@ -12,4 +12,10 @@ describe('inspect-cli flag parsing', () => {
   it('validates explicit format values', () => {
     expect(() => inspectInternals.parseInspectFlags(['--format', 'xml', 'artifact'])).toThrow(/format/);
   });
+
+  it('rejects extra positional arguments', () => {
+    expect(() => inspectInternals.parseInspectFlags(['artifact', 'shadow'])).toThrow(
+      /Unexpected inspect-cli argument 'shadow'/
+    );
+  });
 });

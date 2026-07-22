@@ -15,7 +15,7 @@ export function materializeHeaders(
       resolved[key] = resolveEnvPlaceholders(value);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to resolve header '${key}' for server '${serverName}': ${message}`);
+      throw new Error(`Failed to resolve header '${key}' for server '${serverName}': ${message}`, { cause: error });
     }
   }
 

@@ -45,6 +45,30 @@ describe('printCallOutput format selection', () => {
       },
     ],
     [
+      'auto prints structuredContent nested inside a result wrapper',
+      'auto',
+      {
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: '{\n  "entities": [],\n  "relations": []\n}',
+            },
+          ],
+          structuredContent: {
+            entities: [],
+            relations: [],
+          },
+        },
+      },
+      (logged: unknown) => {
+        expect(JSON.parse(String(logged))).toEqual({
+          entities: [],
+          relations: [],
+        });
+      },
+    ],
+    [
       'text prefers text over markdown/json',
       'text',
       {
@@ -85,6 +109,17 @@ describe('printCallOutput format selection', () => {
       { content: [{ type: 'text', text: 'no json here' }] },
       (logged: unknown) => {
         expect(JSON.parse(String(logged))).toEqual({ content: [{ type: 'text', text: 'no json here' }] });
+      },
+    ],
+    [
+      'json emits valid JSON for MCP error envelopes instead of inspect output',
+      'json',
+      { content: [{ type: 'text', text: 'MCP error -32602: Tool search not found' }], isError: true },
+      (logged: unknown) => {
+        expect(JSON.parse(String(logged))).toEqual({
+          content: [{ type: 'text', text: 'MCP error -32602: Tool search not found' }],
+          isError: true,
+        });
       },
     ],
     [

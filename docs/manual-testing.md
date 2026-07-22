@@ -40,6 +40,7 @@ cat /tmp/list-SERVER.log
 ```
 
 Verify:
+
 - Header shows the right name/transport and the new metadata line (`tools · duration · transport`).
 - Timeouts produce the footer block: `Tools: <timed out after ...>` and `Reason: ...`.
 
@@ -53,6 +54,7 @@ cat /tmp/call-SERVER.log
 ```
 
 Checks:
+
 - Successful calls print the payload; failures reuse the shared hinting (`SSE error ...`, auto-correct messages, etc.).
 - For HTTP selectors (`https://.../mcp.tool` or `https://.../mcp.tool(args)`), ensure no OAuth prompt appears and the request hits the configured server.
 
@@ -68,8 +70,16 @@ cat /tmp/auth-SERVER.log
 ```
 
 Expectations:
+
 - If a token cache exists, log should mention the cleared directory.
 - Failed auths emit the unified message (`Failed to authorize 'SERVER': ...`).
+
+For headless OAuth URL capture, run the same auth command with `--no-browser`:
+
+- Text mode stdout should contain exactly one authorization URL line and no logger prefix.
+- `--json --no-browser` stdout should parse as JSON with `authorizationUrl` and `redirectUrl`.
+- If completing the flow from another machine over SSH, forward the printed callback port with a loopback-only tunnel; avoid exposing the callback listener publicly.
+- Treat copied authorization URLs as sensitive and avoid storing them in long-lived logs.
 
 ## Tips
 

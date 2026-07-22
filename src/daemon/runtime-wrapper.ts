@@ -1,8 +1,14 @@
-import type { ListResourcesRequest } from '@modelcontextprotocol/sdk/types.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { ServerDefinition } from '../config.js';
 import { isKeepAliveServer } from '../lifecycle.js';
-import type { CallOptions, ListToolsOptions, Runtime } from '../runtime.js';
+import type {
+  CallOptions,
+  ConnectOptions,
+  ListResourcesOptions,
+  ListToolsOptions,
+  ReadResourceOptions,
+  Runtime,
+} from '../runtime.js';
 import type { DaemonClient } from './client.js';
 
 interface KeepAliveRuntimeOptions {
@@ -47,13 +53,22 @@ class KeepAliveRuntime implements Runtime {
     }
   }
 
+  async getInstructions(server: string): Promise<string | undefined> {
+    return this.base.getInstructions?.(server);
+  }
+
   async listTools(server: string, options?: ListToolsOptions): Promise<Awaited<ReturnType<Runtime['listTools']>>> {
+    if (options?.oauthSessionOptions) {
+      return this.base.listTools(server, options);
+    }
     if (this.shouldUseDaemon(server)) {
       return (await this.invokeWithRestart(server, 'listTools', () =>
         this.daemon.listTools({
           server,
           includeSchema: options?.includeSchema,
           autoAuthorize: options?.autoAuthorize,
+          allowCachedAuth: options?.allowCachedAuth ?? true,
+          disableOAuth: options?.disableOAuth,
         })
       )) as Awaited<ReturnType<Runtime['listTools']>>;
     }
@@ -68,23 +83,45 @@ class KeepAliveRuntime implements Runtime {
           tool: toolName,
           args: options?.args,
           timeoutMs: options?.timeoutMs,
+          disableOAuth: options?.disableOAuth,
         })
       );
     }
     return this.base.callTool(server, toolName, options);
   }
 
-  async listResources(server: string, options?: Partial<ListResourcesRequest['params']>): Promise<unknown> {
+  async listResources(server: string, options?: ListResourcesOptions): Promise<unknown> {
+    if (options?.oauthSessionOptions) {
+      return this.base.listResources(server, options);
+    }
+    const { allowCachedAuth, disableOAuth, ...params } = options ?? {};
     if (this.shouldUseDaemon(server)) {
       return this.invokeWithRestart(server, 'listResources', () =>
-        this.daemon.listResources({ server, params: options ?? {} })
+        this.daemon.listResources({ server, params, allowCachedAuth, disableOAuth })
       );
     }
     return this.base.listResources(server, options);
   }
 
-  async connect(server: string): Promise<Awaited<ReturnType<Runtime['connect']>>> {
-    return this.base.connect(server);
+  async readResource(server: string, uri: string, options?: ReadResourceOptions): Promise<unknown> {
+    if (options?.oauthSessionOptions) {
+      return this.base.readResource(server, uri, options);
+    }
+    if (this.shouldUseDaemon(server)) {
+      return this.invokeWithRestart(server, 'readResource', () =>
+        this.daemon.readResource({
+          server,
+          uri,
+          allowCachedAuth: options?.allowCachedAuth,
+          disableOAuth: options?.disableOAuth,
+        })
+      );
+    }
+    return this.base.readResource(server, uri, options);
+  }
+
+  async connect(server: string, options?: ConnectOptions): Promise<Awaited<ReturnType<Runtime['connect']>>> {
+    return this.base.connect(server, options);
   }
 
   async close(server?: string): Promise<void> {
@@ -149,5 +186,5 @@ function shouldRestartDaemonServer(error: unknown): boolean {
 
 function logDaemonRetry(server: string, operation: string, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
-  console.log(`[mcporter] Restarting '${server}' before retrying ${operation}: ${reason}`);
+  console.error(`[mcporter] Restarting '${server}' before retrying ${operation}: ${reason}`);
 }

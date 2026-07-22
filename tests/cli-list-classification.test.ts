@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerDefinition } from '../src/config.js';
 import { cliModulePromise, linearDefinition } from './fixtures/cli-list-fixtures.js';
@@ -52,7 +55,7 @@ describe('CLI list classification and routing', () => {
             return Promise.resolve([]);
         }
       },
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -99,7 +102,7 @@ describe('CLI list classification and routing', () => {
       }),
       getDefinitions: () => Array.from(definitions.values()),
       listTools: vi.fn().mockRejectedValue(new Error('SSE error: Non-200 status code (401)')),
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -110,9 +113,55 @@ describe('CLI list classification and routing', () => {
       (call[0]?.toString() ?? '').includes("Next: run 'mcporter auth https://mcp.supabase.com/mcp'")
     );
     expect(hinted).toBe(true);
+    expect(warnSpy.mock.calls.map((call) => call.join(' '))).toContain('  Tools: <unavailable>');
 
     warnSpy.mockRestore();
     logSpy.mockRestore();
+  });
+
+  it('persists OAuth promotion for ad-hoc HTTP servers', async () => {
+    const { handleList } = await cliModulePromise;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcporter-persist-oauth-'));
+    const persistPath = path.join(tempDir, 'mcporter.json');
+    const definitions = new Map<string, ServerDefinition>();
+    const runtime = {
+      registerDefinition: vi.fn((definition: ServerDefinition) => {
+        definitions.set(definition.name, definition);
+      }),
+      getDefinition: vi.fn((name: string) => {
+        const entry = definitions.get(name);
+        if (!entry) {
+          throw new Error(`Unknown MCP server '${name}'.`);
+        }
+        return entry;
+      }),
+      getDefinitions: () => Array.from(definitions.values()),
+      listTools: vi.fn(async (name: string) => {
+        const entry = definitions.get(name);
+        if (!entry) {
+          throw new Error(`Unknown MCP server '${name}'.`);
+        }
+        definitions.set(name, { ...entry, auth: 'oauth' });
+        return [{ name: 'ok' }];
+      }),
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await handleList(runtime, ['https://mcp.granola.ai/mcp', '--persist', persistPath]);
+
+      const parsed = JSON.parse(await fs.readFile(persistPath, 'utf8')) as {
+        mcpServers: Record<string, { auth?: string; baseUrl?: string }>;
+      };
+      expect(parsed.mcpServers['mcp-granola-ai-mcp']).toMatchObject({
+        baseUrl: 'https://mcp.granola.ai/mcp',
+        auth: 'oauth',
+      });
+    } finally {
+      logSpy.mockRestore();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('reuses configured servers when listing by URL', async () => {
@@ -130,11 +179,14 @@ describe('CLI list classification and routing', () => {
       registerDefinition,
       getDefinition: () => definition,
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await handleList(runtime, ['https://mcp.vercel.com']);
 
-    expect(listTools).toHaveBeenCalledWith('vercel', expect.anything());
+    expect(listTools).toHaveBeenCalledWith(
+      'vercel',
+      expect.objectContaining({ includeSchema: true, autoAuthorize: false, allowCachedAuth: true })
+    );
     expect(registerDefinition).not.toHaveBeenCalled();
   });
 
@@ -153,11 +205,14 @@ describe('CLI list classification and routing', () => {
       registerDefinition,
       getDefinition: () => definition,
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await handleList(runtime, ['https://www.shadcn.io/api/mcp.getComponents']);
 
-    expect(listTools).toHaveBeenCalledWith('shadcn', expect.anything());
+    expect(listTools).toHaveBeenCalledWith(
+      'shadcn',
+      expect.objectContaining({ includeSchema: true, autoAuthorize: false, allowCachedAuth: true })
+    );
     expect(registerDefinition).not.toHaveBeenCalled();
   });
 
@@ -175,11 +230,14 @@ describe('CLI list classification and routing', () => {
       registerDefinition: vi.fn(),
       getDefinition: () => definition,
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await handleList(runtime, ['shadcn.io/api/mcp.getComponents']);
 
-    expect(listTools).toHaveBeenCalledWith('shadcn', expect.anything());
+    expect(listTools).toHaveBeenCalledWith(
+      'shadcn',
+      expect.objectContaining({ includeSchema: true, autoAuthorize: false, allowCachedAuth: true })
+    );
   });
 
   it('enables cached OAuth when listing all servers', async () => {
@@ -195,13 +253,14 @@ describe('CLI list classification and routing', () => {
     const runtime = {
       getDefinitions: () => [definition],
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await handleList(runtime, []);
 
     expect(listTools).toHaveBeenCalledWith('linear', {
       autoAuthorize: false,
       allowCachedAuth: true,
+      disableOAuth: false,
     });
   });
 
@@ -223,7 +282,7 @@ describe('CLI list classification and routing', () => {
       },
       listTools,
       registerDefinition,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -231,7 +290,10 @@ describe('CLI list classification and routing', () => {
 
     expect(registerDefinition).toHaveBeenCalled();
     expect(definitions.get('mcp-example-com-mcp')).toBeDefined();
-    expect(listTools).toHaveBeenCalledWith('mcp-example-com-mcp', expect.objectContaining({ includeSchema: true }));
+    expect(listTools).toHaveBeenCalledWith(
+      'mcp-example-com-mcp',
+      expect.objectContaining({ includeSchema: true, autoAuthorize: false, allowCachedAuth: true })
+    );
 
     logSpy.mockRestore();
   });
@@ -250,14 +312,17 @@ describe('CLI list classification and routing', () => {
       getDefinition,
       getDefinitions: () => [definition],
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await handleList(runtime, ['linera']);
 
     expect(getDefinition).toHaveBeenCalledTimes(2);
-    expect(listTools).toHaveBeenCalledWith('linear', expect.objectContaining({ includeSchema: true }));
+    expect(listTools).toHaveBeenCalledWith(
+      'linear',
+      expect.objectContaining({ includeSchema: true, autoAuthorize: false, allowCachedAuth: true })
+    );
     const messages = logSpy.mock.calls.map((call) => call.join(' '));
     expect(messages.some((line) => line.includes('Auto-corrected server name to linear'))).toBe(true);
 
@@ -266,6 +331,8 @@ describe('CLI list classification and routing', () => {
 
   it('suggests a server name when the typo is large', async () => {
     const { handleList } = await cliModulePromise;
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
     const definition = linearDefinition;
     const listTools = vi.fn();
     const runtime = {
@@ -274,18 +341,22 @@ describe('CLI list classification and routing', () => {
       },
       getDefinitions: () => [definition],
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await handleList(runtime, ['zzz']);
+    try {
+      await handleList(runtime, ['zzz']);
 
-    const errorLines = errorSpy.mock.calls.map((call) => call.join(' '));
-    expect(errorLines.some((line) => line.includes('Did you mean linear?'))).toBe(true);
-    expect(listTools).not.toHaveBeenCalled();
-
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
+      const errorLines = errorSpy.mock.calls.map((call) => call.join(' '));
+      expect(errorLines.some((line) => line.includes('Did you mean linear?'))).toBe(true);
+      expect(listTools).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
   });
 });

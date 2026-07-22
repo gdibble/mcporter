@@ -1,5 +1,15 @@
-import type { CommandSpec, RawEntry, ServerDefinition, ServerLoggingOptions, ServerSource } from './config-schema.js';
-import { expandHome } from './env.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import type {
+  CommandSpec,
+  RawEntry,
+  RawRefresh,
+  RefreshableBearerOptions,
+  ServerDefinition,
+  ServerLoggingOptions,
+  ServerSource,
+} from './config-schema.js';
+import { expandHome, resolveEnvPlaceholders } from './env.js';
 import { resolveLifecycle } from './lifecycle.js';
 
 export function normalizeServerEntry(
@@ -9,19 +19,28 @@ export function normalizeServerEntry(
   source: ServerSource,
   sources: readonly ServerSource[]
 ): ServerDefinition {
+  const resolvedRaw = resolveConfigEnvPlaceholders(name, raw);
+  raw = resolvedRaw;
   const description = raw.description;
   const env = raw.env ? { ...raw.env } : undefined;
   const auth = normalizeAuth(raw.auth);
   const tokenCacheDir = normalizePath(raw.tokenCacheDir ?? raw.token_cache_dir);
   const clientName = raw.clientName ?? raw.client_name;
+  const oauthClientId = raw.oauthClientId ?? raw.oauth_client_id ?? undefined;
+  const oauthClientSecret = raw.oauthClientSecret ?? raw.oauth_client_secret ?? undefined;
+  const oauthClientSecretEnv = raw.oauthClientSecretEnv ?? raw.oauth_client_secret_env ?? undefined;
+  const oauthTokenEndpointAuthMethod =
+    raw.oauthTokenEndpointAuthMethod ?? raw.oauth_token_endpoint_auth_method ?? undefined;
   const oauthRedirectUrl = raw.oauthRedirectUrl ?? raw.oauth_redirect_url ?? undefined;
   const oauthScope = raw.oauthScope ?? raw.oauth_scope ?? undefined;
+  const refresh = normalizeRefresh(raw.refresh);
+  const httpFetch = normalizeHttpFetch(raw.httpFetch ?? raw.http_fetch);
   const oauthCommandRaw = raw.oauthCommand ?? raw.oauth_command;
   const oauthCommand = oauthCommandRaw ? { args: [...oauthCommandRaw.args] } : undefined;
   const headers = buildHeaders(raw);
 
   const httpUrl = getUrl(raw);
-  const stdio = getCommand(raw);
+  const stdio = getCommand(raw, baseDir);
 
   let command: CommandSpec;
 
@@ -36,7 +55,7 @@ export function normalizeServerEntry(
       kind: 'stdio',
       command: stdio.command,
       args: stdio.args,
-      cwd: baseDir,
+      cwd: resolveCwd(raw.cwd, baseDir),
     };
   } else {
     throw new Error(`Server '${name}' is missing a baseUrl/url or command definition in mcporter.json`);
@@ -44,6 +63,8 @@ export function normalizeServerEntry(
 
   const lifecycle = resolveLifecycle(name, raw.lifecycle, command);
   const logging = normalizeLogging(raw.logging);
+  const allowedTools = raw.allowedTools ?? raw.allowed_tools;
+  const blockedTools = raw.blockedTools ?? raw.blocked_tools;
 
   const defaultedOauthCommand =
     !oauthCommand && name.toLowerCase() === 'gmail' && command.kind === 'stdio'
@@ -58,19 +79,74 @@ export function normalizeServerEntry(
     auth,
     tokenCacheDir,
     clientName,
+    oauthClientId,
+    oauthClientSecret,
+    oauthClientSecretEnv,
+    oauthTokenEndpointAuthMethod,
     oauthRedirectUrl,
     oauthScope,
     oauthCommand: defaultedOauthCommand,
+    refresh,
+    httpFetch,
     source,
     sources,
     lifecycle,
     logging,
+    ...(allowedTools !== undefined ? { allowedTools: [...allowedTools] } : {}),
+    ...(blockedTools !== undefined ? { blockedTools: [...blockedTools] } : {}),
   };
 }
 
 export const __configInternals = {
   ensureHttpAcceptHeader,
+  resolveConfigEnvPlaceholders,
 };
+
+function resolveConfigEnvPlaceholders(name: string, raw: RawEntry): RawEntry {
+  return resolveConfigEnvValue(name, raw, []) as RawEntry;
+}
+
+function resolveConfigEnvValue(name: string, value: unknown, pathSegments: readonly string[]): unknown {
+  if (typeof value === 'string') {
+    if (!value.includes('$') || shouldDeferEnvResolution(pathSegments)) {
+      return value;
+    }
+    try {
+      return resolveEnvPlaceholders(value);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const field = pathSegments.join('.') || '<root>';
+      throw new Error(`Server '${name}' field '${field}' has unresolved env placeholder: ${message}`, { cause: error });
+    }
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => resolveConfigEnvValue(name, entry, [...pathSegments, String(index)]));
+  }
+
+  if (value && typeof value === 'object') {
+    const resolved: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      resolved[key] = resolveConfigEnvValue(name, entry, [...pathSegments, key]);
+    }
+    return resolved;
+  }
+
+  return value;
+}
+
+function shouldDeferEnvResolution(pathSegments: readonly string[]): boolean {
+  const [root] = pathSegments;
+  const field = pathSegments.at(-1) ?? '';
+  return (
+    root === 'headers' ||
+    root === 'env' ||
+    field === 'bearerToken' ||
+    field === 'bearer_token' ||
+    field.endsWith('Env') ||
+    field.endsWith('_env')
+  );
+}
 
 function normalizeAuth(auth: string | undefined): string | undefined {
   if (!auth) {
@@ -79,7 +155,29 @@ function normalizeAuth(auth: string | undefined): string | undefined {
   if (auth.toLowerCase() === 'oauth') {
     return 'oauth';
   }
+  if (auth.toLowerCase() === 'refreshable_bearer') {
+    return 'refreshable_bearer';
+  }
   return undefined;
+}
+
+function normalizeRefresh(raw: RawRefresh | undefined): RefreshableBearerOptions | undefined {
+  const tokenEndpoint = raw?.tokenEndpoint ?? raw?.token_endpoint;
+  if (!tokenEndpoint) {
+    return undefined;
+  }
+  return {
+    tokenEndpoint,
+    clientIdEnv: raw?.clientIdEnv ?? raw?.client_id_env,
+    clientSecretEnv: raw?.clientSecretEnv ?? raw?.client_secret_env,
+    clientAuthMethod: raw?.clientAuthMethod ?? raw?.client_auth_method,
+    refreshSkewSeconds: raw?.refreshSkewSeconds ?? raw?.refresh_skew_seconds,
+    accessTokenEnv: raw?.accessTokenEnv ?? raw?.access_token_env,
+  };
+}
+
+function normalizeHttpFetch(value: 'default' | 'node-http1' | undefined): 'default' | 'node-http1' | undefined {
+  return value;
 }
 
 function normalizePath(input: string | undefined): string | undefined {
@@ -89,11 +187,18 @@ function normalizePath(input: string | undefined): string | undefined {
   return expandHome(input);
 }
 
+function resolveCwd(input: string | undefined, baseDir: string): string {
+  if (!input) {
+    return baseDir;
+  }
+  return path.resolve(baseDir, expandHome(input));
+}
+
 function getUrl(raw: RawEntry): string | undefined {
   return raw.baseUrl ?? raw.base_url ?? raw.url ?? raw.serverUrl ?? raw.server_url ?? undefined;
 }
 
-function getCommand(raw: RawEntry): { command: string; args: string[] } | undefined {
+function getCommand(raw: RawEntry, baseDir: string): { command: string; args: string[] } | undefined {
   const commandValue = raw.command ?? raw.executable;
   if (Array.isArray(commandValue)) {
     if (commandValue.length === 0 || typeof commandValue[0] !== 'string') {
@@ -106,6 +211,9 @@ function getCommand(raw: RawEntry): { command: string; args: string[] } | undefi
     if (args.length > 0) {
       return { command: commandValue, args };
     }
+    if (isExistingCommandPath(commandValue, baseDir)) {
+      return { command: commandValue, args: [] };
+    }
     const tokens = parseCommandString(commandValue);
     if (tokens.length === 0) {
       return undefined;
@@ -117,6 +225,33 @@ function getCommand(raw: RawEntry): { command: string; args: string[] } | undefi
     return { command: commandToken, args: rest };
   }
   return undefined;
+}
+
+function isExistingCommandPath(value: string, baseDir: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.includes(' ')) {
+    return false;
+  }
+  if (!looksLikePath(trimmed)) {
+    return false;
+  }
+  const expanded = expandHome(trimmed);
+  const resolved = path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+  try {
+    return fs.statSync(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function looksLikePath(value: string): boolean {
+  return (
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.startsWith('/') ||
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('~/')
+  );
 }
 
 function buildHeaders(raw: RawEntry): Record<string, string> | undefined {

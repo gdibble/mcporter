@@ -1,12 +1,27 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { __test as emitTsTestInternals, handleEmitTs } from '../src/cli/emit-ts-command.js';
 import { renderClientModule, renderTypesModule } from '../src/cli/emit-ts-templates.js';
 import { buildToolMetadata } from '../src/cli/generate/tools.js';
 import type { Runtime } from '../src/runtime.js';
+import type { ServerToolInfo } from '../src/runtime.js';
 import { integrationDefinition, listCommentsTool } from './fixtures/tool-fixtures.js';
+
+const dashedTool: ServerToolInfo = {
+  name: 'API-post-page',
+  description: 'Create a Notion page',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      parent: { type: 'string', description: 'Parent id' },
+    },
+    required: ['parent'],
+  },
+  outputSchema: { title: 'Page' },
+};
 
 function createRuntimeStub(): Runtime {
   return {
@@ -43,6 +58,32 @@ describe('emit-ts templates', () => {
     expect(source).toContain('Issue identifier');
   });
 
+  it('quotes generated TypeScript members for tool names that are not identifiers', () => {
+    const docs = emitTsTestInternals.buildDocEntries('integration', [buildToolMetadata(dashedTool)], true);
+    const metadata = {
+      server: integrationDefinition,
+      generatorLabel: 'mcporter@test',
+      generatedAt: new Date('2025-11-07T00:00:00Z'),
+    };
+    const types = renderTypesModule({ interfaceName: 'IntegrationTools', docs, metadata });
+    const client = renderClientModule({
+      interfaceName: 'IntegrationTools',
+      docs,
+      metadata,
+      typesImportPath: './integration-client',
+    });
+
+    expect(types).toContain('"API-post-page"(parent: string): Promise<Page>;');
+    expect(client).toContain('async "API-post-page"(params: Parameters<IntegrationTools["API-post-page"]>[0])');
+    expect(client).toContain('proxy.aPIPostPage');
+
+    for (const source of [types, client]) {
+      const parsed = ts.createSourceFile('emit.ts', source, ts.ScriptTarget.ES2022, false, ts.ScriptKind.TS);
+      const diagnostics = (parsed as { parseDiagnostics?: ts.Diagnostic[] }).parseDiagnostics ?? [];
+      expect(diagnostics.map((entry) => ts.flattenDiagnosticMessageText(entry.messageText, '\n'))).toEqual([]);
+    }
+  });
+
   it('renders client module that wraps proxy calls', () => {
     const docs = emitTsTestInternals.buildDocEntries('integration', [buildToolMetadata(listCommentsTool)], true);
     const metadata = {
@@ -59,6 +100,10 @@ describe('emit-ts templates', () => {
     expect(source).toContain('createIntegrationClient');
     expect(source).toContain('wrapCallResult');
     expect(source).toContain('proxy.listComments');
+  });
+
+  it('does not leave a .d suffix when importing generated declaration files', () => {
+    expect(emitTsTestInternals.computeImportPath('/tmp/client.ts', '/tmp/client.d.ts')).toBe('./client');
   });
 });
 

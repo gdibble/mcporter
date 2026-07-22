@@ -1,7 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CliArtifactMetadata } from '../../cli-metadata.js';
-import { type HttpCommand, loadServerDefinitions, type ServerDefinition, type StdioCommand } from '../../config.js';
+import {
+  type HttpCommand,
+  loadServerDefinitions,
+  type RawLifecycle,
+  type RefreshableBearerOptions,
+  type ServerDefinition,
+  type ServerLoggingOptions,
+  type StdioCommand,
+} from '../../config.js';
+import { resolveLifecycle } from '../../lifecycle.js';
 import type { Runtime, ServerToolInfo } from '../../runtime.js';
 import { createRuntime } from '../../runtime.js';
 import { extractHttpServerTarget, normalizeHttpUrl } from '../http-utils.js';
@@ -176,10 +185,6 @@ function pickDescription(
 }
 
 export function normalizeDefinition(def: DefinitionInput): ServerDefinition {
-  if (isServerDefinition(def)) {
-    return def;
-  }
-
   const name = def.name;
   if (typeof name !== 'string' || name.trim().length === 0) {
     throw new Error('Server definition must include a name.');
@@ -190,29 +195,67 @@ export function normalizeDefinition(def: DefinitionInput): ServerDefinition {
   const auth = typeof def.auth === 'string' ? def.auth : undefined;
   const tokenCacheDir = typeof def.tokenCacheDir === 'string' ? def.tokenCacheDir : undefined;
   const clientName = typeof def.clientName === 'string' ? def.clientName : undefined;
+  const record = def as Record<string, unknown>;
+  const oauthClientId = stringFromAliases(record, 'oauthClientId', 'oauth_client_id');
+  const oauthClientSecret = stringFromAliases(record, 'oauthClientSecret', 'oauth_client_secret');
+  const oauthClientSecretEnv = stringFromAliases(record, 'oauthClientSecretEnv', 'oauth_client_secret_env');
+  const oauthTokenEndpointAuthMethod = stringFromAliases(
+    record,
+    'oauthTokenEndpointAuthMethod',
+    'oauth_token_endpoint_auth_method'
+  );
+  const oauthRedirectUrl = typeof def.oauthRedirectUrl === 'string' ? def.oauthRedirectUrl : undefined;
+  const oauthScope = typeof def.oauthScope === 'string' ? def.oauthScope : undefined;
+  const refresh = getRefresh(record.refresh);
+  const httpFetch = normalizeHttpFetch(stringFromAliases(record, 'httpFetch', 'http_fetch'));
   const headers = toStringRecord((def as Record<string, unknown>).headers);
+  const oauthCommand = getOauthCommand(record.oauthCommand ?? record.oauth_command);
+  const rawLifecycle = getRawLifecycle(record.lifecycle);
+  const logging = getLogging(record.logging);
+  const allowedTools = getOptionalStringArray(record.allowedTools ?? record.allowed_tools, 'allowedTools');
+  const blockedTools = getOptionalStringArray(record.blockedTools ?? record.blocked_tools, 'blockedTools');
+  if (allowedTools !== undefined && blockedTools !== undefined) {
+    throw new Error(`Server definition '${name}' cannot specify both allowedTools and blockedTools.`);
+  }
+  const shared = (
+    command: ServerDefinition['command']
+  ): Omit<ServerDefinition, 'name' | 'description' | 'command'> => ({
+    env,
+    auth,
+    tokenCacheDir,
+    clientName,
+    oauthClientId,
+    oauthClientSecret,
+    oauthClientSecretEnv,
+    oauthTokenEndpointAuthMethod,
+    oauthRedirectUrl,
+    oauthScope,
+    oauthCommand,
+    refresh,
+    httpFetch,
+    lifecycle: resolveLifecycle(name, rawLifecycle, command),
+    logging,
+    ...(allowedTools !== undefined ? { allowedTools } : {}),
+    ...(blockedTools !== undefined ? { blockedTools } : {}),
+  });
 
   const commandValue = def.command;
   if (isCommandSpec(commandValue)) {
+    const command = normalizeCommand(commandValue, headers);
     return {
       name,
       description,
-      command: normalizeCommand(commandValue, headers),
-      env,
-      auth,
-      tokenCacheDir,
-      clientName,
+      command,
+      ...shared(command),
     };
   }
   if (typeof commandValue === 'string' && commandValue.trim().length > 0) {
+    const command = toCommandSpec(commandValue, getStringArray(record.args), headers ? { headers } : undefined);
     return {
       name,
       description,
-      command: toCommandSpec(commandValue, getStringArray(def.args), headers ? { headers } : undefined),
-      env,
-      auth,
-      tokenCacheDir,
-      clientName,
+      command,
+      ...shared(command),
     };
   }
   if (Array.isArray(commandValue) && commandValue.length > 0) {
@@ -220,28 +263,15 @@ export function normalizeDefinition(def: DefinitionInput): ServerDefinition {
     if (typeof first !== 'string' || !rest.every((entry) => typeof entry === 'string')) {
       throw new Error('Command array must contain only strings.');
     }
+    const command = toCommandSpec(first, rest as string[], headers ? { headers } : undefined);
     return {
       name,
       description,
-      command: toCommandSpec(first, rest as string[], headers ? { headers } : undefined),
-      env,
-      auth,
-      tokenCacheDir,
-      clientName,
+      command,
+      ...shared(command),
     };
   }
   throw new Error('Server definition must include command information.');
-}
-
-function isServerDefinition(value: unknown): value is ServerDefinition {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  if (typeof record.name !== 'string') {
-    return false;
-  }
-  return isCommandSpec(record.command);
 }
 
 function isCommandSpec(value: unknown): value is ServerDefinition['command'] {
@@ -309,6 +339,88 @@ function getStringArray(value: unknown): string[] | undefined {
   }
   const entries = value.filter((item): item is string => typeof item === 'string');
   return entries.length > 0 ? entries : undefined;
+}
+
+function getOptionalStringArray(value: unknown, fieldName: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+    throw new Error(`${fieldName} must be an array of strings.`);
+  }
+  return [...value];
+}
+
+function getRawLifecycle(value: unknown): RawLifecycle | undefined {
+  if (value === 'keep-alive' || value === 'ephemeral') {
+    return value;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const record = value as { mode?: unknown; idleTimeoutMs?: unknown };
+    if (record.mode === 'keep-alive' || record.mode === 'ephemeral') {
+      return {
+        mode: record.mode,
+        ...(typeof record.idleTimeoutMs === 'number' ? { idleTimeoutMs: record.idleTimeoutMs } : {}),
+      };
+    }
+  }
+  return undefined;
+}
+
+function getLogging(value: unknown): ServerLoggingOptions | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const daemon = (value as { daemon?: unknown }).daemon;
+  if (typeof daemon !== 'object' || daemon === null) {
+    return undefined;
+  }
+  const enabled = (daemon as { enabled?: unknown }).enabled;
+  return typeof enabled === 'boolean' ? { daemon: { enabled } } : { daemon: {} };
+}
+
+function getOauthCommand(value: unknown): ServerDefinition['oauthCommand'] | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const args = getStringArray((value as { args?: unknown }).args);
+  return args ? { args } : undefined;
+}
+
+function getRefresh(value: unknown): RefreshableBearerOptions | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const tokenEndpoint = stringFromAliases(record, 'tokenEndpoint', 'token_endpoint');
+  if (!tokenEndpoint) {
+    return undefined;
+  }
+  const refreshSkewSeconds = record.refreshSkewSeconds ?? record.refresh_skew_seconds;
+  return {
+    tokenEndpoint,
+    clientIdEnv: stringFromAliases(record, 'clientIdEnv', 'client_id_env'),
+    clientSecretEnv: stringFromAliases(record, 'clientSecretEnv', 'client_secret_env'),
+    clientAuthMethod: stringFromAliases(record, 'clientAuthMethod', 'client_auth_method'),
+    ...(typeof refreshSkewSeconds === 'number' && Number.isInteger(refreshSkewSeconds) && refreshSkewSeconds >= 0
+      ? { refreshSkewSeconds }
+      : {}),
+    accessTokenEnv: stringFromAliases(record, 'accessTokenEnv', 'access_token_env'),
+  };
+}
+
+function normalizeHttpFetch(value: string | undefined): ServerDefinition['httpFetch'] | undefined {
+  return value === 'default' || value === 'node-http1' ? value : undefined;
+}
+
+function stringFromAliases(record: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string') {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function toStringRecord(value: unknown): Record<string, string> | undefined {

@@ -1,3 +1,5 @@
+import { parsePositiveInteger } from '../timeouts.js';
+
 export interface GeneratorCommonFlags {
   runtime?: 'node' | 'bun';
   timeout?: number;
@@ -31,8 +33,8 @@ export function extractGeneratorFlags(args: string[], options: ExtractOptions = 
       if (!raw) {
         throw new Error("Flag '--timeout' requires a value.");
       }
-      const parsed = Number.parseInt(raw, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
+      const parsed = parsePositiveInteger(raw);
+      if (parsed === undefined) {
         throw new Error('--timeout must be a positive integer.');
       }
       result.timeout = parsed;

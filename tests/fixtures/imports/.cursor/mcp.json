@@ -1,7 +1,12 @@
 {
   "mcpServers": {
     "shared": {
-      "baseUrl": "https://cursor.local/mcp"
+      "baseUrl": "https://cursor.local/mcp",
+      "httpFetch": "node-http1",
+      "refresh": {
+        "tokenEndpoint": "https://auth.cursor.local/token",
+        "accessTokenEnv": "CURSOR_ACCESS_TOKEN"
+      }
     },
     "cursor-only": {
       "command": "cursor-cli",

@@ -37,19 +37,87 @@ function createRuntime(): Runtime {
 describe('handleList JSON output', () => {
   it('emits aggregated status counts', async () => {
     const runtime = createRuntime();
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runHandleList(runtime, ['--json']);
+    try {
+      await runHandleList(runtime, ['--json']);
+
+      const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
+      expect(payload.mode).toBe('list');
+      expect(payload.counts.auth).toBe(1);
+      const healthyEntry = payload.servers.find((entry: { name: string }) => entry.name === 'healthy');
+      expect(healthyEntry.status).toBe('ok');
+      const authEntry = payload.servers.find((entry: { name: string }) => entry.name === 'auth-server');
+      expect(authEntry.status).toBe('auth');
+      expect(authEntry.issue.kind).toBe('auth');
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('sets a non-zero exit code for unhealthy multi-server checks when requested', async () => {
+    const runtime = createRuntime();
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await runHandleList(runtime, ['--json', '--exit-code']);
+
+      const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
+      expect(payload.counts.auth).toBe(1);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('suppresses output and sets the exit code for quiet checks', async () => {
+    const runtime = createRuntime();
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await runHandleList(runtime, ['--quiet']);
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it('emits a concise single-server status payload', async () => {
+    const runtime = createRuntime();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runHandleList(runtime, ['healthy', '--status', '--json']);
 
     const payload = JSON.parse(logSpy.mock.calls.at(-1)?.[0] ?? '{}');
     expect(payload.mode).toBe('list');
-    expect(payload.counts.auth).toBe(1);
-    const healthyEntry = payload.servers.find((entry: { name: string }) => entry.name === 'healthy');
-    expect(healthyEntry.status).toBe('ok');
-    const authEntry = payload.servers.find((entry: { name: string }) => entry.name === 'auth-server');
-    expect(authEntry.status).toBe('auth');
-    expect(authEntry.issue.kind).toBe('auth');
+    expect(payload.counts.ok).toBe(1);
+    expect(payload.servers).toHaveLength(1);
+    expect(payload.servers[0].name).toBe('healthy');
+    expect(payload.servers[0].status).toBe('ok');
 
     logSpy.mockRestore();
+  });
+
+  it('rejects status checks for configured tool selectors', async () => {
+    const runtime = createRuntime();
+
+    await expect(runHandleList(runtime, ['healthy.list_documents', '--status'])).rejects.toThrow(
+      '--status cannot be used with a tool selector.'
+    );
   });
 });

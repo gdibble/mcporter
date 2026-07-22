@@ -4,24 +4,38 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Logger } from './logging.js';
 
+export interface CloseTransportAndWaitOptions {
+  readonly throwOnCloseError?: boolean;
+}
+
 // closeTransportAndWait closes transports and ensures backing processes exit cleanly.
 export async function closeTransportAndWait(
   logger: Logger,
-  transport: Transport & { close(): Promise<void> }
+  transport: Transport & { close(): Promise<void> },
+  options: CloseTransportAndWaitOptions = {}
 ): Promise<void> {
   const pidBeforeClose = getTransportPid(transport);
   const childProcess =
     transport instanceof StdioClientTransport
       ? ((transport as unknown as { _process?: ChildProcess | null })._process ?? null)
       : null;
+  let closeError: unknown;
   try {
     await transport.close();
   } catch (error) {
-    logger.warn(`Failed to close transport cleanly: ${(error as Error).message}`);
+    if (options.throwOnCloseError) {
+      closeError = error;
+    } else {
+      logger.warn(`Failed to close transport cleanly: ${(error as Error).message}`);
+    }
   }
 
   if (childProcess) {
     await waitForChildClose(childProcess, 1_000).catch(() => {});
+  }
+
+  if (closeError) {
+    throw closeError;
   }
 
   if (!pidBeforeClose) {
@@ -57,7 +71,7 @@ async function waitForChildClose(child: ChildProcess, timeoutMs: number): Promis
   ) {
     return;
   }
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = () => {
       if (settled) {
@@ -66,6 +80,14 @@ async function waitForChildClose(child: ChildProcess, timeoutMs: number): Promis
       settled = true;
       cleanup();
       resolve();
+    };
+    const timeout = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error(`Timed out waiting ${timeoutMs}ms for child process to close.`));
     };
     const cleanup = () => {
       child.removeListener('close', finish);
@@ -80,7 +102,7 @@ async function waitForChildClose(child: ChildProcess, timeoutMs: number): Promis
     child.once('error', finish);
     let timer: NodeJS.Timeout | undefined;
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      timer = setTimeout(finish, timeoutMs);
+      timer = setTimeout(timeout, timeoutMs);
       timer.unref?.();
     }
   });
@@ -298,6 +320,7 @@ function collectDescendantsFromChildren(rootPid: number, children: Map<number, n
 
 export const __testHooks = {
   listDescendantPids,
+  waitForChildClose,
 };
 
 async function waitForTreeExit(pids: number[], durationMs: number): Promise<boolean> {

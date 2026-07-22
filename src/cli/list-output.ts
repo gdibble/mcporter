@@ -13,11 +13,16 @@ export interface ToolDetailResult {
   optionalOmitted: boolean;
 }
 
+export interface ToolBriefResult {
+  optionalOmitted: boolean;
+}
+
 export interface ListJsonServerEntry {
   name: string;
   status: StatusCategory;
   durationMs: number;
   description?: string;
+  instructions?: string;
   transport?: string;
   source?: ServerDefinition['source'];
   sources?: ServerDefinition['sources'];
@@ -33,18 +38,23 @@ export interface ListJsonServerEntry {
 }
 
 export function printSingleServerHeader(
-  definition: ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>,
+  definition: ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>,
   toolCount: number | undefined,
   durationMs: number | undefined,
   transportSummary: string,
   sourcePath: string | undefined,
-  options?: { printSummaryNow?: boolean }
+  options?: { printSummaryNow?: boolean; instructions?: string }
 ): string {
   const prefix = boldText(definition.name);
   if (definition.description) {
     console.log(`${prefix} - ${extraDimText(definition.description)}`);
   } else {
     console.log(prefix);
+  }
+  if (options?.instructions) {
+    for (const line of formatInstructionLines(options.instructions)) {
+      console.log(`  ${extraDimText(line)}`);
+    }
   }
   const summaryParts: string[] = [];
   summaryParts.push(
@@ -69,8 +79,18 @@ export function printSingleServerHeader(
   return summaryLine;
 }
 
+function formatInstructionLines(instructions: string): string[] {
+  const normalized = instructions.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return [];
+  }
+  const maxLength = 500;
+  const clipped = normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
+  return [`Instructions: ${clipped}`];
+}
+
 export function printToolDetail(
-  definition: ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>,
+  definition: ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>,
   metadata: ToolMetadata,
   includeSchema: boolean,
   requiredOnly: boolean
@@ -106,8 +126,32 @@ export function printToolDetail(
   };
 }
 
+export function printBriefTool(
+  definition: ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>,
+  metadata: ToolMetadata,
+  requiredOnly: boolean
+): ToolBriefResult {
+  const doc = buildToolDoc({
+    serverName: definition.name,
+    toolName: metadata.tool.name,
+    description: metadata.tool.description,
+    outputSchema: metadata.tool.outputSchema,
+    options: metadata.options,
+    requiredOnly,
+    colorize: true,
+  });
+  console.log(`  ${doc.signature}`);
+  if (doc.optionalSummary && requiredOnly) {
+    console.log(`  ${doc.optionalSummary}`);
+  }
+  console.log('');
+  return {
+    optionalOmitted: doc.hiddenOptions.length > 0,
+  };
+}
+
 function buildExampleOptions(
-  definition: ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>
+  definition: ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>
 ): { selector?: string; wrapExpression?: boolean } | undefined {
   if (definition.source?.kind !== 'local' || definition.source.path !== '<adhoc>') {
     return undefined;
@@ -150,7 +194,7 @@ export function buildJsonListEntry(
       description: result.server.description,
       transport: formatTransportSummary(
         result.server as ReturnType<
-          Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']
+          Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']
         >
       ),
       source: result.server.source,
@@ -164,7 +208,7 @@ export function buildJsonListEntry(
     };
   }
   const authCommand = buildAuthCommandHint(
-    result.server as ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>
+    result.server as ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>
   );
   const advice = classifyListError(result.error, result.server.name, timeoutSeconds, { authCommand });
   return {
@@ -173,7 +217,9 @@ export function buildJsonListEntry(
     durationMs: result.durationMs,
     description: result.server.description,
     transport: formatTransportSummary(
-      result.server as ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>
+      result.server as ReturnType<
+        Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']
+      >
     ),
     source: result.server.source,
     sources: options.includeSources ? result.server.sources : undefined,
@@ -193,7 +239,7 @@ export function createUnknownResult(server: ServerDefinition): ListSummaryResult
 }
 
 export function buildAuthCommandHint(
-  definition: ReturnType<Awaited<ReturnType<typeof import('../runtime.js')['createRuntime']>>['getDefinition']>
+  definition: ReturnType<Awaited<ReturnType<(typeof import('../runtime.js'))['createRuntime']>>['getDefinition']>
 ): string {
   if (definition.source?.kind === 'local' && definition.source.path === '<adhoc>') {
     if (definition.command.kind === 'http') {
@@ -220,5 +266,5 @@ function quoteCommandSegment(segment: string): string {
   if (/^[A-Za-z0-9_./:-]+$/.test(segment)) {
     return segment;
   }
-  return JSON.stringify(segment);
+  return `'${segment.replace(/'/g, `'\\''`)}'`;
 }

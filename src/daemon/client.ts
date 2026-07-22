@@ -2,8 +2,8 @@ import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { listConfigLayerPaths } from '../config.js';
-import { launchDaemonDetached } from './launch.js';
+import { listConfigLayerPaths } from '../config/path-discovery.js';
+import { withFileLock } from '../fs-json.js';
 import { getDaemonMetadataPath, getDaemonSocketPath } from './paths.js';
 import type {
   CallToolParams,
@@ -13,6 +13,7 @@ import type {
   DaemonResponse,
   ListResourcesParams,
   ListToolsParams,
+  ReadResourceParams,
   StatusResult,
 } from './protocol.js';
 
@@ -23,6 +24,7 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_DAEMON_TIMEOUT_MS = 30_000;
+const MIN_DAEMON_STATUS_TIMEOUT_MS = 1_000;
 
 export interface DaemonPaths {
   readonly key: string;
@@ -39,6 +41,8 @@ interface DaemonMetadata {
   readonly startedAt: number;
   readonly logPath?: string | null;
 }
+
+type DaemonConfigState = 'missing' | 'fresh' | 'stale';
 
 export function resolveDaemonPaths(configPath: string): DaemonPaths {
   const key = deriveConfigKey(configPath);
@@ -72,19 +76,16 @@ export class DaemonClient {
     return this.invoke('listResources', params);
   }
 
+  async readResource(params: ReadResourceParams): Promise<unknown> {
+    return this.invoke('readResource', params);
+  }
+
   async closeServer(params: CloseServerParams): Promise<void> {
     await this.invoke('closeServer', params);
   }
 
   async status(): Promise<StatusResult | null> {
-    try {
-      return (await this.sendRequest<StatusResult>('status', {})) as StatusResult;
-    } catch (error) {
-      if (isTransportError(error)) {
-        return null;
-      }
-      throw error;
-    }
+    return await this.readVerifiedStatus();
   }
 
   async stop(): Promise<void> {
@@ -99,7 +100,7 @@ export class DaemonClient {
   }
 
   private async invoke<T = unknown>(method: DaemonRequestMethod, params: unknown, timeoutMs?: number): Promise<T> {
-    await this.ensureDaemon();
+    await this.ensureDaemon(timeoutMs);
     try {
       return (await this.sendRequest<T>(method, params, timeoutMs)) as T;
     } catch (error) {
@@ -111,44 +112,85 @@ export class DaemonClient {
     }
   }
 
-  private async ensureDaemon(): Promise<void> {
-    if (await this.isConfigStale()) {
+  private async ensureDaemon(timeoutMs?: number): Promise<void> {
+    const statusTimeoutMs = resolveDaemonStatusTimeout(timeoutMs);
+    const metadata = await readDaemonMetadata(this.metadataPath);
+    const configState = await this.checkConfigState(metadata);
+    if (configState === 'stale') {
+      await this.restartDaemon({ reason: 'stale-config', expectedPid: metadata?.pid });
+      return;
+    }
+    if (configState === 'fresh') {
+      if (await this.isResponsive(statusTimeoutMs)) {
+        return;
+      }
+    }
+    await this.startDaemon({ preflightTimeoutMs: statusTimeoutMs });
+  }
+
+  private async restartDaemon(options: { reason?: 'stale-config'; expectedPid?: number } = {}): Promise<void> {
+    await this.startingWithLock(async () => {
+      const currentStatus = await this.readVerifiedStatus();
+      if (
+        currentStatus &&
+        options.expectedPid !== undefined &&
+        currentStatus.pid !== options.expectedPid &&
+        (await this.checkConfigState()) === 'fresh'
+      ) {
+        return;
+      }
+      if (options.reason === 'stale-config' && currentStatus && (await this.checkConfigState()) === 'fresh') {
+        return;
+      }
       await this.stop().catch(() => {});
-      await this.restartDaemon();
-      return;
-    }
-    const available = await this.isResponsive();
-    if (available) {
-      return;
-    }
-    await this.startDaemon();
-    await this.waitForReady();
+      await this.waitForStopped();
+      await this.launchDaemonAndWait();
+    });
   }
 
-  private async restartDaemon(): Promise<void> {
-    await this.startDaemon();
-    await this.waitForReady();
+  private async startDaemon(options: { preflightTimeoutMs?: number } = {}): Promise<void> {
+    await this.startingWithLock(async () => {
+      if (await this.isResponsive(options.preflightTimeoutMs)) {
+        return;
+      }
+      await this.launchDaemonAndWait();
+    });
   }
 
-  private async startDaemon(): Promise<void> {
+  private async startingWithLock(task: () => Promise<void>): Promise<void> {
     if (this.startingPromise) {
       await this.startingPromise;
       return;
     }
-    this.startingPromise = Promise.resolve()
-      .then(() => {
-        launchDaemonDetached({
-          configPath: this.options.configPath,
-          configExplicit: this.options.configExplicit,
-          rootDir: this.options.rootDir,
-          metadataPath: this.metadataPath,
-          socketPath: this.socketPath,
-        });
-      })
-      .finally(() => {
-        this.startingPromise = null;
-      });
+    this.startingPromise = withFileLock(this.metadataPath, async () => {
+      await task();
+    }).finally(() => {
+      this.startingPromise = null;
+    });
     await this.startingPromise;
+  }
+
+  private async launchDaemonAndWait(): Promise<void> {
+    const { launchDaemonDetached } = await import('./launch.js');
+    launchDaemonDetached({
+      configPath: this.options.configPath,
+      configExplicit: this.options.configExplicit,
+      rootDir: this.options.rootDir,
+      metadataPath: this.metadataPath,
+      socketPath: this.socketPath,
+    });
+    await this.waitForReady();
+  }
+
+  private async waitForStopped(): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (!(await this.isResponsive())) {
+        return;
+      }
+      await delay(100);
+    }
+    throw new Error('Daemon did not stop before restart could begin.');
   }
 
   private async waitForReady(): Promise<void> {
@@ -162,38 +204,49 @@ export class DaemonClient {
     throw new Error('Timeout while waiting for MCPorter daemon to start.');
   }
 
-  private async isResponsive(): Promise<boolean> {
+  private async isResponsive(timeoutMs?: number): Promise<boolean> {
+    return (await this.readVerifiedStatus(timeoutMs)) !== null;
+  }
+
+  private async readVerifiedStatus(timeoutMs?: number): Promise<StatusResult | null> {
+    const metadata = await readDaemonMetadata(this.metadataPath);
+    if (!metadata || metadata.socketPath !== this.socketPath || !isProcessRunning(metadata.pid)) {
+      return null;
+    }
     try {
-      await this.sendRequest('status', {});
-      return true;
+      const status = (await this.sendRequest<StatusResult>('status', {}, timeoutMs)) as StatusResult;
+      if (status.pid !== metadata.pid || status.socketPath !== metadata.socketPath) {
+        return null;
+      }
+      return status;
     } catch (error) {
       if (isTransportError(error)) {
-        return false;
+        return null;
       }
       throw error;
     }
   }
 
-  private async isConfigStale(): Promise<boolean> {
-    const metadata = await readDaemonMetadata(this.metadataPath);
+  private async checkConfigState(metadata?: DaemonMetadata | null): Promise<DaemonConfigState> {
+    metadata ??= await readDaemonMetadata(this.metadataPath);
     if (!metadata) {
-      return false;
+      return 'missing';
     }
     const currentLayers = normalizeLayers(await collectConfigLayers(this.options));
     const metadataLayers = normalizeLayers(
       metadata.configLayers ?? [{ path: metadata.configPath, mtimeMs: metadata.configMtimeMs ?? null }]
     );
     if (currentLayers.length !== metadataLayers.length) {
-      return true;
+      return 'stale';
     }
     for (let i = 0; i < currentLayers.length; i += 1) {
       const current = currentLayers[i];
       const previous = metadataLayers[i];
       if (!current || !previous || current.path !== previous.path || current.mtimeMs !== previous.mtimeMs) {
-        return true;
+        return 'stale';
       }
     }
-    return false;
+    return 'fresh';
   }
 
   private async sendRequest<T>(method: DaemonRequestMethod, params: unknown, timeoutOverrideMs?: number): Promise<T> {
@@ -283,6 +336,18 @@ function isTransportError(error: unknown): boolean {
   return code === 'ECONNREFUSED' || code === 'ENOENT' || code === 'ETIMEDOUT' || code === 'ECONNRESET';
 }
 
+function isProcessRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 function resolveDaemonTimeout(override?: number): number {
   if (typeof override === 'number' && Number.isFinite(override) && override > 0) {
     return override;
@@ -296,6 +361,13 @@ function resolveDaemonTimeout(override?: number): number {
     return DEFAULT_DAEMON_TIMEOUT_MS;
   }
   return parsed;
+}
+
+function resolveDaemonStatusTimeout(override?: number): number | undefined {
+  if (typeof override !== 'number' || !Number.isFinite(override) || override <= 0) {
+    return undefined;
+  }
+  return Math.max(override, MIN_DAEMON_STATUS_TIMEOUT_MS);
 }
 
 async function statConfigMtime(configPath: string): Promise<number | null> {
@@ -344,7 +416,12 @@ function delay(ms: number): Promise<void> {
 function normalizeLayers(
   layers: Array<{ path: string; mtimeMs: number | null }>
 ): Array<{ path: string; mtimeMs: number | null }> {
-  return layers
-    .map((entry) => ({ path: path.resolve(entry.path), mtimeMs: entry.mtimeMs ?? null }))
-    .sort((a, b) => a.path.localeCompare(b.path));
+  const normalized = layers.map((entry) => ({
+    path: path.isAbsolute(entry.path) ? entry.path : path.resolve(entry.path),
+    mtimeMs: entry.mtimeMs ?? null,
+  }));
+  if (normalized.length < 2) {
+    return normalized;
+  }
+  return normalized.toSorted((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

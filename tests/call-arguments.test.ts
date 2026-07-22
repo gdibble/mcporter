@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { parseCallArguments } from '../src/cli/call-arguments.js';
 
@@ -40,13 +43,109 @@ describe('parseCallArguments', () => {
     expect(parsed.args.orderBy).toBe('updatedAt');
   });
 
-  it.each([
-    ['--source', '--source'],
-    ['--source=import', '--source=import'],
-  ] as const)('throws on unknown long flags like %s', (flag, expectedToken) => {
-    expect(() => parseCallArguments(['server.tool', flag])).toThrow(
-      new RegExp(`Unknown flag '${expectedToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`)
-    );
+  it('parses generic --key value flags as named tool arguments', () => {
+    const parsed = parseCallArguments([
+      'email.send_email',
+      '--to',
+      '["miguel@example.com"]',
+      '--subject',
+      'Test',
+      '--save-to-drafts',
+      'true',
+      '--limit=5',
+    ]);
+    expect(parsed.args).toEqual({
+      to: ['miguel@example.com'],
+      subject: 'Test',
+      saveToDrafts: true,
+      limit: 5,
+    });
+    expect(parsed.schemaStringCoercionCandidates).toEqual({ limit: '5' });
+  });
+
+  it('merges --json object payloads as an alias for --args', () => {
+    const parsed = parseCallArguments([
+      'email.send_email',
+      '--json',
+      '{"to":["miguel@example.com"],"subject":"Test","saveToDrafts":true}',
+      '--text',
+      'Hello',
+    ]);
+    expect(parsed.args).toEqual({
+      to: ['miguel@example.com'],
+      subject: 'Test',
+      saveToDrafts: true,
+      text: 'Hello',
+    });
+  });
+
+  it('reads JSON object payloads from stdin when --json - is used', () => {
+    const readFileSync = vi
+      .spyOn(fs, 'readFileSync')
+      .mockReturnValueOnce('{"to":["miguel@example.com"],"subject":"Test"}');
+    try {
+      const parsed = parseCallArguments(['email.send_email', '--json', '-']);
+      expect(parsed.args).toEqual({
+        to: ['miguel@example.com'],
+        subject: 'Test',
+      });
+      expect(readFileSync).toHaveBeenCalledWith(0, 'utf8');
+    } finally {
+      readFileSync.mockRestore();
+    }
+  });
+
+  it('reads exact UTF-8 text from @path named argument values', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcporter-call-args-'));
+    const payloadPath = path.join(tempDir, 'payload.txt');
+    fs.writeFileSync(payloadPath, 'first line\nsecond line\n', 'utf8');
+    try {
+      const parsed = parseCallArguments(['server.tool', `body=@${payloadPath}`]);
+      expect(parsed.args.body).toBe('first line\nsecond line\n');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('supports @path through generic long tool flags', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcporter-call-args-'));
+    const payloadPath = path.join(tempDir, 'payload.txt');
+    fs.writeFileSync(payloadPath, 'from file', 'utf8');
+    try {
+      const parsed = parseCallArguments(['server.tool', '--body', `@${payloadPath}`]);
+      expect(parsed.args.body).toBe('from file');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves whitespace-only generic long flag values', () => {
+    const parsed = parseCallArguments(['server.tool', '--body', '   ']);
+    expect(parsed.args.body).toBe('   ');
+  });
+
+  it('uses @@ to preserve a literal leading @ without reading a file', () => {
+    const parsed = parseCallArguments(['server.tool', 'body=@@literal']);
+    expect(parsed.args.body).toBe('@literal');
+  });
+
+  it('reports missing and non-UTF-8 argument files before transport', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcporter-call-args-'));
+    const invalidPath = path.join(tempDir, 'invalid.bin');
+    fs.writeFileSync(invalidPath, Buffer.from([0xc3, 0x28]));
+    try {
+      expect(() => parseCallArguments(['server.tool', `body=@${path.join(tempDir, 'missing.txt')}`])).toThrow(
+        /Unable to read argument file/
+      );
+      expect(() => parseCallArguments(['server.tool', `body=@${invalidPath}`])).toThrow(/not valid UTF-8 text/);
+      expect(() => parseCallArguments(['server.tool', 'body=@'])).toThrow(/requires a path/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when generic long flags are missing a value', () => {
+    expect(() => parseCallArguments(['server.tool', '--source'])).toThrow("Flag '--source' requires a value.");
   });
 
   it('treats values after -- as literal positional arguments', () => {
@@ -59,6 +158,21 @@ describe('parseCallArguments', () => {
     expect(() => parseCallArguments(['--server', 'linear', 'cursor.list_documents(limit:1)'])).toThrow(
       /Conflicting server names/
     );
+  });
+
+  it('treats key:=value as an alias for key=value without keeping a trailing colon', () => {
+    const parsed = parseCallArguments(['schwab.placeOrder', 'price:=5.20', 'quantity:=0', 'limit:=10']);
+    expect(parsed.args.price).toBe('5.20');
+    expect(parsed.args.quantity).toBe(0);
+    expect(parsed.args.limit).toBe(10);
+    expect(parsed.schemaStringCoercionCandidates).toEqual({ quantity: '0', limit: '10' });
+    expect(parsed.args).not.toHaveProperty('price:');
+  });
+
+  it('leaves := inside values untouched', () => {
+    const parsed = parseCallArguments(['server.tool', 'expr=value:=x']);
+    expect(parsed.args.expr).toBe('value:=x');
+    expect(parsed.args).not.toHaveProperty('expr:');
   });
 
   it('warns when colon-style arguments omit a value', () => {
@@ -110,6 +224,12 @@ describe('parseCallArguments', () => {
     expect(parsed.args.meta).toBe('{"a":1}');
     expect(typeof parsed.args.id).toBe('string');
     expect(parsed.positionalArgs).toEqual(['123']);
+  });
+
+  it('captures --no-oauth as a runtime flag instead of a tool argument', () => {
+    const parsed = parseCallArguments(['server.tool', '--no-oauth', 'limit=5']);
+    expect(parsed.disableOAuth).toBe(true);
+    expect(parsed.args).toEqual({ limit: 5 });
   });
 
   it('captures --save-images output directory', () => {

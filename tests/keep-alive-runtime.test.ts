@@ -2,13 +2,15 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerDefinition } from '../src/config.js';
 import { createKeepAliveRuntime } from '../src/daemon/runtime-wrapper.js';
-import type { CallOptions, ListToolsOptions, Runtime } from '../src/runtime.js';
+import type { CallOptions, ConnectOptions, ListToolsOptions, Runtime } from '../src/runtime.js';
 
 class FakeRuntime implements Runtime {
   private readonly definitions: ServerDefinition[];
   public readonly callToolMock = vi.fn().mockResolvedValue('local-call');
   public readonly listToolsMock = vi.fn().mockResolvedValue([{ name: 'local-tool' }]);
   public readonly listResourcesMock = vi.fn().mockResolvedValue([]);
+  public readonly readResourceMock = vi.fn().mockResolvedValue({ contents: [] });
+  public readonly connectMock = vi.fn().mockResolvedValue({ client: {}, transport: {}, definition: {} });
   public readonly closeMock = vi.fn().mockResolvedValue(undefined);
 
   constructor(definitions: ServerDefinition[]) {
@@ -35,6 +37,10 @@ class FakeRuntime implements Runtime {
     // no-op for tests
   }
 
+  async getInstructions(): Promise<string | undefined> {
+    return undefined;
+  }
+
   async listTools(server: string, options?: ListToolsOptions): Promise<Awaited<ReturnType<Runtime['listTools']>>> {
     return await this.listToolsMock(server, options);
   }
@@ -47,8 +53,12 @@ class FakeRuntime implements Runtime {
     return await this.listResourcesMock(server, options);
   }
 
-  async connect(): Promise<never> {
-    throw new Error('not implemented');
+  async readResource(server: string, uri: string): Promise<unknown> {
+    return await this.readResourceMock(server, uri);
+  }
+
+  async connect(server: string, options?: ConnectOptions): Promise<Awaited<ReturnType<Runtime['connect']>>> {
+    return await this.connectMock(server, options);
   }
 
   async close(server?: string): Promise<void> {
@@ -79,6 +89,7 @@ describe('createKeepAliveRuntime', () => {
       callTool: vi.fn().mockResolvedValue('daemon-call'),
       listTools: vi.fn().mockResolvedValue([{ name: 'remote-tool' }]),
       listResources: vi.fn().mockResolvedValue(['resource']),
+      readResource: vi.fn().mockResolvedValue({ contents: [{ uri: 'memo://1', text: 'daemon-resource' }] }),
       closeServer: vi.fn().mockResolvedValue(undefined),
     };
     const keepAliveRuntime = createKeepAliveRuntime(runtime as unknown as Runtime, {
@@ -92,13 +103,44 @@ describe('createKeepAliveRuntime', () => {
       tool: 'ping',
       args: { value: 1 },
       timeoutMs: 4_200,
+      disableOAuth: undefined,
     });
 
     await keepAliveRuntime.listTools('alpha', { includeSchema: true });
-    expect(daemon.listTools).toHaveBeenCalledWith({ server: 'alpha', includeSchema: true, autoAuthorize: undefined });
+    expect(daemon.listTools).toHaveBeenCalledWith({
+      server: 'alpha',
+      includeSchema: true,
+      autoAuthorize: undefined,
+      allowCachedAuth: true,
+      disableOAuth: undefined,
+    });
+
+    await keepAliveRuntime.listTools('alpha', { allowCachedAuth: false });
+    expect(daemon.listTools).toHaveBeenLastCalledWith({
+      server: 'alpha',
+      includeSchema: undefined,
+      autoAuthorize: undefined,
+      allowCachedAuth: false,
+      disableOAuth: undefined,
+    });
 
     await keepAliveRuntime.listResources('alpha', { cursor: '1' });
-    expect(daemon.listResources).toHaveBeenCalledWith({ server: 'alpha', params: { cursor: '1' } });
+    expect(daemon.listResources).toHaveBeenCalledWith({
+      server: 'alpha',
+      params: { cursor: '1' },
+      allowCachedAuth: undefined,
+      disableOAuth: undefined,
+    });
+
+    await expect(keepAliveRuntime.readResource('alpha', 'memo://1')).resolves.toEqual({
+      contents: [{ uri: 'memo://1', text: 'daemon-resource' }],
+    });
+    expect(daemon.readResource).toHaveBeenCalledWith({
+      server: 'alpha',
+      uri: 'memo://1',
+      allowCachedAuth: undefined,
+      disableOAuth: undefined,
+    });
 
     await keepAliveRuntime.close('alpha');
     expect(daemon.closeServer).toHaveBeenCalledWith({ server: 'alpha' });
@@ -110,6 +152,58 @@ describe('createKeepAliveRuntime', () => {
     expect(runtime.closeMock).toHaveBeenCalledWith(undefined);
   });
 
+  it('forwards disableOAuth through daemon requests and connect wrappers', async () => {
+    const runtime = new FakeRuntime(definitions);
+    const daemon = {
+      callTool: vi.fn().mockResolvedValue('daemon-call'),
+      listTools: vi.fn().mockResolvedValue([{ name: 'remote-tool' }]),
+      listResources: vi.fn().mockResolvedValue(['resource']),
+      readResource: vi.fn().mockResolvedValue({ contents: [] }),
+      closeServer: vi.fn().mockResolvedValue(undefined),
+    };
+    const keepAliveRuntime = createKeepAliveRuntime(runtime as unknown as Runtime, {
+      daemonClient: daemon as never,
+      keepAliveServers: new Set(['alpha']),
+    });
+
+    await keepAliveRuntime.callTool('alpha', 'ping', { disableOAuth: true });
+    expect(daemon.callTool).toHaveBeenCalledWith({
+      server: 'alpha',
+      tool: 'ping',
+      args: undefined,
+      timeoutMs: undefined,
+      disableOAuth: true,
+    });
+
+    await keepAliveRuntime.listTools('alpha', { disableOAuth: true });
+    expect(daemon.listTools).toHaveBeenCalledWith({
+      server: 'alpha',
+      includeSchema: undefined,
+      autoAuthorize: undefined,
+      allowCachedAuth: true,
+      disableOAuth: true,
+    });
+
+    await keepAliveRuntime.listResources('alpha', { cursor: '1', disableOAuth: true });
+    expect(daemon.listResources).toHaveBeenCalledWith({
+      server: 'alpha',
+      params: { cursor: '1' },
+      allowCachedAuth: undefined,
+      disableOAuth: true,
+    });
+
+    await keepAliveRuntime.readResource('alpha', 'memo://1', { disableOAuth: true });
+    expect(daemon.readResource).toHaveBeenCalledWith({
+      server: 'alpha',
+      uri: 'memo://1',
+      allowCachedAuth: undefined,
+      disableOAuth: true,
+    });
+
+    await keepAliveRuntime.connect('alpha', { disableOAuth: true });
+    expect(runtime.connectMock).toHaveBeenCalledWith('alpha', { disableOAuth: true });
+  });
+
   it('restarts daemon servers after fatal errors and retries the operation', async () => {
     const runtime = new FakeRuntime(definitions);
     const daemon = {
@@ -117,18 +211,22 @@ describe('createKeepAliveRuntime', () => {
       closeServer: vi.fn().mockResolvedValue(undefined),
       listTools: vi.fn(),
       listResources: vi.fn(),
+      readResource: vi.fn(),
     };
     const keepAliveRuntime = createKeepAliveRuntime(runtime as unknown as Runtime, {
       daemonClient: daemon as never,
       keepAliveServers: new Set(['alpha']),
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(keepAliveRuntime.callTool('alpha', 'ping', {})).resolves.toBe('daemon-call');
     expect(daemon.callTool).toHaveBeenCalledTimes(2);
     expect(daemon.closeServer).toHaveBeenCalledWith({ server: 'alpha' });
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Restarting 'alpha'"));
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Restarting 'alpha'"));
     logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   it('deduplicates concurrent restarts for the same server', async () => {
@@ -148,6 +246,7 @@ describe('createKeepAliveRuntime', () => {
       }),
       listTools: vi.fn(),
       listResources: vi.fn(),
+      readResource: vi.fn(),
     };
     const keepAliveRuntime = createKeepAliveRuntime(runtime as unknown as Runtime, {
       daemonClient: daemon as never,
@@ -172,6 +271,7 @@ describe('createKeepAliveRuntime', () => {
       closeServer: vi.fn().mockResolvedValue(undefined),
       listTools: vi.fn(),
       listResources: vi.fn(),
+      readResource: vi.fn(),
     };
     const keepAliveRuntime = createKeepAliveRuntime(runtime as unknown as Runtime, {
       daemonClient: daemon as never,

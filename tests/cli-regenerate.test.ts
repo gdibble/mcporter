@@ -197,7 +197,7 @@ async function writeMetadataFixture(kind: ArtifactKind): Promise<string> {
       kind: 'http' as const,
       url: 'https://mcp.vercel.com',
       headers: {
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: metadata preserves env-placeholder format
+        // Metadata preserves env-placeholder format.
         Authorization: 'Bearer ${VERCEL_TOKEN}',
       },
     },

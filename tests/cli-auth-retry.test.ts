@@ -20,7 +20,7 @@ describe('handleAuth retry logic', () => {
       registerDefinition: vi.fn(),
       getDefinition: vi.fn().mockReturnValue(baseDefinition),
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await expect(handleAuth(runtime, ['adhoc-server'])).resolves.toBeUndefined();
     expect(listTools).toHaveBeenCalledTimes(2);
@@ -33,7 +33,7 @@ describe('handleAuth retry logic', () => {
       registerDefinition: vi.fn(),
       getDefinition: vi.fn().mockReturnValue(baseDefinition),
       listTools,
-    } as unknown as Awaited<ReturnType<typeof import('../src/runtime.js')['createRuntime']>>;
+    } as unknown as Awaited<ReturnType<(typeof import('../src/runtime.js'))['createRuntime']>>;
 
     await expect(handleAuth(runtime, ['adhoc-server'])).rejects.toThrow(/Failed to authorize/);
     expect(listTools).toHaveBeenCalledTimes(2);

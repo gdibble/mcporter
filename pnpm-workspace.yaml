@@ -1,2 +1,11 @@
 onlyBuiltDependencies:
   - esbuild
+overrides:
+  body-parser: 2.3.0
+  esbuild: 0.28.1
+  hono: 4.12.27
+  ip-address: 10.2.0
+  qs: 6.15.3
+  vite: 8.1.4
+
+minimumReleaseAge: 2880

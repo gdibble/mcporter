@@ -12,12 +12,32 @@ export interface GeneratedOption {
   description?: string;
   required: boolean;
   type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'unknown';
-  arrayItemType?: 'string' | 'number' | 'boolean' | 'unknown';
+  arrayItemType?: 'string' | 'number' | 'boolean' | 'object' | 'unknown';
   placeholder: string;
   exampleValue?: string;
   enumValues?: string[];
   defaultValue?: unknown;
   formatHint?: string;
+}
+
+function resolveSchemaType(value: unknown): GeneratedOption['type'] | undefined {
+  if (value === 'integer') {
+    return 'number';
+  }
+  if (value === 'string' || value === 'number' || value === 'boolean' || value === 'array' || value === 'object') {
+    return value;
+  }
+  return undefined;
+}
+
+function resolveArrayItemType(value: unknown): GeneratedOption['arrayItemType'] | undefined {
+  if (value === 'integer') {
+    return 'number';
+  }
+  if (value === 'string' || value === 'number' || value === 'boolean' || value === 'object') {
+    return value;
+  }
+  return undefined;
 }
 
 export function buildToolMetadata(tool: ServerToolInfo): ToolMetadata {
@@ -30,9 +50,30 @@ export function buildToolMetadata(tool: ServerToolInfo): ToolMetadata {
   };
 }
 
+export function buildToolMetadataList(
+  tools: ServerToolInfo[],
+  options: { readonly sort?: boolean } = {}
+): ToolMetadata[] {
+  const result = tools.map((tool) => buildToolMetadata(tool));
+  if (options.sort !== false) {
+    result.sort((left, right) => left.tool.name.localeCompare(right.tool.name));
+  }
+  const methods = new Map<string, string>();
+  for (const entry of result) {
+    const previous = methods.get(entry.methodName);
+    if (previous) {
+      throw new Error(
+        `Generated proxy method collision '${entry.methodName}' for tools '${previous}' and '${entry.tool.name}'.`
+      );
+    }
+    methods.set(entry.methodName, entry.tool.name);
+  }
+  return result;
+}
+
 export function buildEmbeddedSchemaMap(tools: ToolMetadata[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const entry of tools) {
+  for (const entry of tools.toSorted((left, right) => left.tool.name.localeCompare(right.tool.name))) {
     if (entry.tool.inputSchema && typeof entry.tool.inputSchema === 'object') {
       result[entry.tool.name] = entry.tool.inputSchema;
     }
@@ -59,7 +100,7 @@ export function extractOptions(tool: ServerToolInfo): GeneratedOption[] {
     const defaultValue = getDescriptorDefault(descriptor);
     const formatInfo = getDescriptorFormatHint(descriptor);
     const placeholder = buildPlaceholder(property, type, enumValues, formatInfo?.slug);
-    const exampleValue = buildExampleValue(property, type, enumValues, defaultValue);
+    const exampleValue = buildExampleValue(property, type, enumValues, defaultValue, arrayItemType);
     return {
       property,
       cliName: toCliOption(property),
@@ -140,7 +181,8 @@ export function buildExampleValue(
   property: string,
   type: GeneratedOption['type'],
   enumValues: string[] | undefined,
-  defaultValue: unknown
+  defaultValue: unknown,
+  arrayItemType?: GeneratedOption['arrayItemType']
 ): string | undefined {
   if (enumValues && enumValues.length > 0) {
     return enumValues[0] as string;
@@ -158,7 +200,16 @@ export function buildExampleValue(
     case 'boolean':
       return 'true';
     case 'array':
-      return 'value1,value2';
+      switch (arrayItemType) {
+        case 'number':
+          return '1,2';
+        case 'boolean':
+          return 'true,false';
+        case 'object':
+          return '[{"key":"value"}]';
+        default:
+          return 'value1,value2';
+      }
     case 'object':
       return '{"key":"value"}';
     default:
@@ -173,6 +224,28 @@ export function buildExampleValue(
 }
 
 export function pickExampleLiteral(option: GeneratedOption): string | undefined {
+  if (option.type === 'array') {
+    if (Array.isArray(option.defaultValue)) {
+      try {
+        return JSON.stringify(option.defaultValue);
+      } catch {
+        return undefined;
+      }
+    }
+    if (option.enumValues && option.enumValues.length > 0) {
+      return JSON.stringify([option.enumValues[0]]);
+    }
+    switch (option.arrayItemType) {
+      case 'number':
+        return '[1, 2]';
+      case 'boolean':
+        return '[true, false]';
+      case 'object':
+        return '[{"key":"value"}]';
+      default:
+        break;
+    }
+  }
   if (option.enumValues && option.enumValues.length > 0) {
     return JSON.stringify(option.enumValues[0]);
   }
@@ -210,7 +283,16 @@ export function buildFallbackLiteral(option: GeneratedOption): string {
     case 'boolean':
       return 'true';
     case 'array':
-      return '["value1"]';
+      switch (option.arrayItemType) {
+        case 'number':
+          return '[1]';
+        case 'boolean':
+          return '[true]';
+        case 'object':
+          return '[{"key":"value"}]';
+        default:
+          return '["value1"]';
+      }
     case 'object':
       return '{"key":"value"}';
     default: {
@@ -230,25 +312,16 @@ export function inferType(descriptor: unknown): GeneratedOption['type'] {
     return 'unknown';
   }
   const type = (descriptor as Record<string, unknown>).type;
-  const resolveType = (value: unknown): GeneratedOption['type'] | undefined => {
-    if (value === 'integer') {
-      return 'number';
-    }
-    if (value === 'string' || value === 'number' || value === 'boolean' || value === 'array' || value === 'object') {
-      return value;
-    }
-    return undefined;
-  };
   if (Array.isArray(type)) {
     for (const entry of type) {
-      const resolved = resolveType(entry);
+      const resolved = resolveSchemaType(entry);
       if (resolved) {
         return resolved;
       }
     }
     return 'unknown';
   }
-  const resolved = resolveType(type);
+  const resolved = resolveSchemaType(type);
   if (resolved) {
     return resolved;
   }
@@ -265,25 +338,16 @@ export function inferArrayItemType(descriptor: unknown): GeneratedOption['arrayI
   }
   const items = record.items as Record<string, unknown>;
   const itemType = items.type;
-  const resolveItemType = (value: unknown): GeneratedOption['arrayItemType'] | undefined => {
-    if (value === 'integer') {
-      return 'number';
-    }
-    if (value === 'string' || value === 'number' || value === 'boolean') {
-      return value;
-    }
-    return undefined;
-  };
   if (Array.isArray(itemType)) {
     for (const entry of itemType) {
-      const resolved = resolveItemType(entry);
+      const resolved = resolveArrayItemType(entry);
       if (resolved) {
         return resolved;
       }
     }
     return 'unknown';
   }
-  const resolved = resolveItemType(itemType);
+  const resolved = resolveArrayItemType(itemType);
   if (resolved) {
     return resolved;
   }

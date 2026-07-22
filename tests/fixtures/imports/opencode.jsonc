@@ -5,7 +5,7 @@
       "description": "Project-level OpenCode server",
       "type": "stdio",
       "command": "opencode-cli",
-      "args": ["serve"]
-    }
-  }
+      "args": ["serve"],
+    },
+  },
 }

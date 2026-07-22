@@ -14,6 +14,15 @@ const describeGenerateCli = process.platform === 'win32' ? describe.skip : descr
 
 let baseUrl: URL;
 const tmpDir = path.join(process.cwd(), 'tmp', 'mcporter-cli-tests');
+const CLI_ENTRY = path.join(process.cwd(), 'dist', 'cli.js');
+
+async function ensureDistBuilt(): Promise<void> {
+  try {
+    await fs.access(CLI_ENTRY);
+  } catch {
+    throw new Error('dist/cli.js is missing; run `pnpm build` before invoking this integration test directly.');
+  }
+}
 
 if (process.platform !== 'win32') {
   beforeAll(async () => {
@@ -113,6 +122,37 @@ if (process.platform !== 'win32') {
         structuredContent: { fields },
       })
     );
+    server.registerTool(
+      'set_cells_batch',
+      {
+        title: 'Set Cells Batch',
+        description: 'Set multiple cells in a single operation',
+        inputSchema: {
+          cells: z.array(
+            z.object({
+              x: z.number().int(),
+              y: z.number().int(),
+              char: z.string().min(1).max(1).optional(),
+              color: z.string().optional(),
+              bgColor: z.string().optional(),
+            })
+          ),
+        },
+        outputSchema: {
+          cells: z.array(
+            z.object({
+              x: z.number(),
+              y: z.number(),
+              char: z.string().optional(),
+            })
+          ),
+        },
+      },
+      async ({ cells }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ cells }) }],
+        structuredContent: { cells },
+      })
+    );
     server.registerResource(
       'greeting',
       new ResourceTemplate('greeting://{name}', { list: undefined }),
@@ -163,20 +203,12 @@ describeGenerateCli('generateCli', () => {
     });
     await fs.mkdir(path.join(tmpDir, 'schema-cache'), { recursive: true });
     const exec = await import('node:child_process');
-    const bunAvailable = await hasBun(exec);
+    const bunAvailable = await hasRunnableBunCompile(exec);
     if (!bunAvailable) {
-      console.warn('bun is not available on this runner; skipping compilation checks.');
+      console.warn('bun-compiled binaries cannot run on this runner; skipping compilation checks.');
       return;
     }
-    await new Promise<void>((resolve, reject) => {
-      exec.exec('pnpm build', execOptions(), (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    await ensureDistBuilt();
 
     const expectedBinaryPath = path.join(tmpDir, 'integration');
     const {
@@ -186,7 +218,8 @@ describeGenerateCli('generateCli', () => {
     } = await generateCli({
       serverRef: inline,
       runtime: 'bun',
-      timeoutMs: 5_000,
+      // Bun's first compiled invocation can spend several seconds initializing on loaded CI hosts.
+      timeoutMs: 10_000,
       minify: true,
       compile: expectedBinaryPath,
     });
@@ -376,6 +409,99 @@ describeGenerateCli('generateCli', () => {
     expect(stdout).not.toContain('<tool> key=value');
   }, 30_000);
 
+  it('runs node .mjs bundles without leaving an implicit template in cwd', async () => {
+    const inline = JSON.stringify({
+      name: 'integration-mjs',
+      description: 'MJS bundle integration server',
+      command: baseUrl.toString(),
+    });
+    const bundlePath = path.join(tmpDir, 'integration-mjs.mjs');
+    await fs.rm(bundlePath, { force: true });
+    await ensureDistBuilt();
+
+    const { outputPath: generated, bundlePath: bundled } = await generateCli({
+      serverRef: inline,
+      runtime: 'node',
+      timeoutMs: 5_000,
+      bundle: bundlePath,
+    });
+
+    expect(bundled).toBe(bundlePath);
+    expect(await exists(bundlePath)).toBe(true);
+    expect(await exists(generated)).toBe(false);
+
+    const { execFile } = await import('node:child_process');
+    const { stdout: helpStdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [bundlePath, '--help'],
+        execOptions(),
+        (error: import('node:child_process').ExecFileException | null, stdout: string, stderr: string) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout, stderr });
+        }
+      );
+    });
+    expect(helpStdout.endsWith('\n')).toBe(true);
+    expect(helpStdout).toContain('https://github.com/openclaw/mcporter');
+
+    const metadata = await readCliMetadata(bundlePath);
+    expect(metadata.artifact.kind).toBe('bundle');
+    expect(metadata.invocation.bundle).toBe(bundlePath);
+
+    const { stdout: callStdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(
+        process.execPath,
+        [bundlePath, 'add', '--a', '20', '--b', '22', '--output', 'json'],
+        execOptions(),
+        (error: import('node:child_process').ExecFileException | null, stdout: string, stderr: string) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout, stderr });
+        }
+      );
+    });
+    expect(JSON.parse(callStdout)).toEqual({ result: 42 });
+  }, 60_000);
+
+  it('generates byte-identical bundles for unchanged inputs', async () => {
+    const inline = JSON.stringify({
+      name: 'deterministic-bundle',
+      description: 'Deterministic bundle integration server',
+      command: baseUrl.toString(),
+    });
+    const firstBundlePath = path.join(tmpDir, 'deterministic-a.js');
+    const secondBundlePath = path.join(tmpDir, 'deterministic-b.js');
+    await fs.rm(firstBundlePath, { force: true });
+    await fs.rm(secondBundlePath, { force: true });
+    await ensureDistBuilt();
+
+    await generateCli({
+      serverRef: inline,
+      runtime: 'node',
+      timeoutMs: 5_000,
+      bundle: firstBundlePath,
+    });
+    await generateCli({
+      serverRef: inline,
+      runtime: 'node',
+      timeoutMs: 5_000,
+      bundle: secondBundlePath,
+    });
+
+    const first = await fs.readFile(firstBundlePath, 'utf8');
+    const second = await fs.readFile(secondBundlePath, 'utf8');
+    expect(first).toBe(second);
+    expect(first).not.toContain(firstBundlePath);
+    expect(first).not.toContain(secondBundlePath);
+    expect(first).not.toMatch(/mcporter-cli-[A-Za-z0-9]{6}/);
+  }, 60_000);
+
   it('maps CLI options to Commander camelCase properties', async () => {
     const inline = JSON.stringify({
       name: 'case-options',
@@ -519,18 +645,119 @@ describeGenerateCli('generateCli', () => {
     });
   }, 30_000);
 
-  it('accepts both kebab-case and underscore tool names for generated CLIs', async () => {
-    const deepwikiRef = JSON.stringify({
-      name: 'deepwiki',
-      description: 'DeepWiki MCP',
-      command: 'https://mcp.deepwiki.com/mcp',
-      tokenCacheDir: path.join(tmpDir, 'deepwiki-cache'),
+  it('lets --raw bypass required generated flags', async () => {
+    const inline = JSON.stringify({
+      name: 'raw-required-test',
+      description: 'Raw required test',
+      command: baseUrl.toString(),
     });
-    const outputPath = path.join(tmpDir, 'deepwiki-cli.ts');
+    const outputPath = path.join(tmpDir, 'raw-required-test.ts');
     await fs.rm(outputPath, { force: true });
 
     const { outputPath: renderedPath } = await generateCli({
-      serverRef: deepwikiRef,
+      serverRef: inline,
+      outputPath,
+      runtime: 'node',
+      timeoutMs: 5_000,
+      includeTools: ['set_cells_batch'],
+    });
+    const content = await fs.readFile(renderedPath, 'utf8');
+    expect(content).toContain('.option("--cells <cells:value1,value2>"');
+    expect(content).not.toContain('.requiredOption("--cells');
+
+    const { execFile } = await import('node:child_process');
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(
+        'pnpm',
+        [
+          'exec',
+          'tsx',
+          renderedPath,
+          'set-cells-batch',
+          '--raw',
+          '{"cells":[{"x":50,"y":15,"char":"A"}]}',
+          '--output',
+          'json',
+        ],
+        execOptions(),
+        (error: import('node:child_process').ExecFileException | null, out: string, err: string) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout: out, stderr: err });
+        }
+      );
+    });
+
+    expect(JSON.parse(stdout)).toEqual({
+      cells: [{ char: 'A', x: 50, y: 15 }],
+    });
+  }, 30_000);
+
+  it('parses generated array flags with JSON object items', async () => {
+    const inline = JSON.stringify({
+      name: 'array-object-test',
+      description: 'Array object test',
+      command: baseUrl.toString(),
+    });
+    const outputPath = path.join(tmpDir, 'array-object-test.ts');
+    await fs.rm(outputPath, { force: true });
+
+    const { outputPath: renderedPath } = await generateCli({
+      serverRef: inline,
+      outputPath,
+      runtime: 'node',
+      timeoutMs: 5_000,
+      includeTools: ['set_cells_batch'],
+    });
+    const content = await fs.readFile(renderedPath, 'utf8');
+    expect(content).toContain("parseArrayOption(value, 'json')");
+
+    const { execFile } = await import('node:child_process');
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      execFile(
+        'pnpm',
+        [
+          'exec',
+          'tsx',
+          renderedPath,
+          'set-cells-batch',
+          '--cells',
+          '{"x":50,"y":15,"char":"A"},{"x":51,"y":15,"char":"B"}',
+          '--output',
+          'json',
+        ],
+        execOptions(),
+        (error: import('node:child_process').ExecFileException | null, out: string, err: string) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout: out, stderr: err });
+        }
+      );
+    });
+
+    expect(JSON.parse(stdout)).toEqual({
+      cells: [
+        { char: 'A', x: 50, y: 15 },
+        { char: 'B', x: 51, y: 15 },
+      ],
+    });
+  }, 30_000);
+
+  it('accepts both kebab-case and underscore tool names for generated CLIs', async () => {
+    const serverRef = JSON.stringify({
+      name: 'tool-alias-test',
+      description: 'Tool alias test',
+      command: baseUrl.toString(),
+    });
+    const outputPath = path.join(tmpDir, 'tool-alias-test.ts');
+    await fs.rm(outputPath, { force: true });
+
+    const { outputPath: renderedPath } = await generateCli({
+      serverRef,
       outputPath,
       runtime: 'node',
       timeoutMs: 10_000,
@@ -554,14 +781,14 @@ describeGenerateCli('generateCli', () => {
       );
     });
 
-    expect(helpOutput).toMatch(/read-wiki-structure/);
-    expect(helpOutput).not.toMatch(/read_wiki_structure/);
+    expect(helpOutput).toMatch(/list-comments/);
+    expect(helpOutput).not.toMatch(/list_comments/);
 
     // underscore alias should still work
     await new Promise<void>((resolve, reject) => {
       execFile(
         'pnpm',
-        ['exec', 'tsx', renderedPath, 'read_wiki_structure', '--help'],
+        ['exec', 'tsx', renderedPath, 'list_comments', '--help'],
         execOptions(),
         (error: import('node:child_process').ExecFileException | null) => {
           if (error) {
@@ -577,7 +804,7 @@ describeGenerateCli('generateCli', () => {
     await new Promise<void>((resolve, reject) => {
       execFile(
         'pnpm',
-        ['exec', 'tsx', renderedPath, 'read-wiki-structure', '--help'],
+        ['exec', 'tsx', renderedPath, 'list-comments', '--help'],
         execOptions(),
         (error: import('node:child_process').ExecFileException | null) => {
           if (error) {
@@ -663,4 +890,39 @@ async function hasBun(exec: typeof import('node:child_process')) {
       resolve(!error);
     });
   });
+}
+
+let bunCompileSupport: Promise<boolean> | undefined;
+
+async function hasRunnableBunCompile(exec: typeof import('node:child_process')) {
+  bunCompileSupport ??= probeRunnableBunCompile(exec);
+  return await bunCompileSupport;
+}
+
+async function probeRunnableBunCompile(exec: typeof import('node:child_process')) {
+  if (!(await hasBun(exec))) {
+    return false;
+  }
+  const tempDir = await fs.mkdtemp(path.join(tmpDir, 'bun-compile-probe-'));
+  const sourcePath = path.join(tempDir, 'probe.ts');
+  const binaryPath = path.join(tempDir, 'probe');
+  try {
+    await fs.writeFile(sourcePath, 'console.log("mcporter-bun-compile-probe");\n', 'utf8');
+    const bun = process.env.BUN_BIN ?? 'bun';
+    const built = await new Promise<boolean>((resolve) => {
+      exec.execFile(bun, ['build', sourcePath, '--compile', '--outfile', binaryPath], execOptions(), (error) =>
+        resolve(!error)
+      );
+    });
+    if (!built) {
+      return false;
+    }
+    return await new Promise<boolean>((resolve) => {
+      exec.execFile(binaryPath, [], execOptions(), (error, stdout) => {
+        resolve(!error && stdout.trim() === 'mcporter-bun-compile-probe');
+      });
+    });
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }

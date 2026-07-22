@@ -28,6 +28,12 @@ describe('mcporter help shortcuts (hidden)', () => {
     { args: ['auth', 'help'], expectSnippet: 'Usage: mcporter auth' },
     { args: ['list', '--help'], expectSnippet: 'Usage: mcporter list' },
     { args: ['list', 'help'], expectSnippet: 'Usage: mcporter list' },
+    { args: ['generate-cli', '--help'], expectSnippet: 'Usage: mcporter generate-cli' },
+    { args: ['generate-cli', 'help'], expectSnippet: 'Usage: mcporter generate-cli' },
+    { args: ['inspect-cli', '--help'], expectSnippet: 'Usage: mcporter inspect-cli' },
+    { args: ['inspect-cli', 'help'], expectSnippet: 'Usage: mcporter inspect-cli' },
+    { args: ['emit-ts', '--help'], expectSnippet: 'Usage: mcporter emit-ts' },
+    { args: ['emit-ts', 'help'], expectSnippet: 'Usage: mcporter emit-ts' },
   ];
 
   it.each(cases)('prints help for %j', async ({ args, expectSnippet }) => {
@@ -37,6 +43,19 @@ describe('mcporter help shortcuts (hidden)', () => {
     await runCli(args);
 
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(expectSnippet));
+    expect(process.exitCode).toBe(0);
+  });
+
+  it.each([
+    ['serve', '--help'],
+    ['serve', 'help'],
+  ])('prints serve HTTP endpoint help for %j', async (...args) => {
+    const { runCli } = await cliModulePromise;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runCli(args);
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('/mcp/<server>'));
     expect(process.exitCode).toBe(0);
   });
 });

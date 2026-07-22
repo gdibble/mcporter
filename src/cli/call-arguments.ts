@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { EphemeralServerSpec } from './adhoc-server.js';
 import { parseLeadingCallExpression } from './call-argument-expression.js';
 import {
@@ -18,10 +19,13 @@ export interface CallArgsParseResult {
   server?: string;
   tool?: string;
   args: Record<string, unknown>;
+  schemaStringCoercionCandidates?: Record<string, string>;
+  schemaArrayCoercionCandidates?: Record<string, string>;
   positionalArgs?: unknown[];
   tailLog: boolean;
   output: OutputFormat;
   timeoutMs?: number;
+  disableOAuth?: boolean;
   ephemeral?: EphemeralServerSpec;
   rawStrings?: boolean;
   saveImagesDir?: string;
@@ -56,11 +60,13 @@ const FLAG_HANDLERS: Record<string, FlagHandler> = {
   '--tool': handleToolFlag,
   '--timeout': handleTimeoutFlag,
   '--tail-log': handleTailLogFlag,
+  '--no-oauth': handleDisableOAuthFlag,
   '--save-images': handleSaveImagesFlag,
   '--yes': handleNoopFlag,
   '--raw-strings': handleRawStringsFlag,
   '--no-coerce': handleNoCoerceFlag,
   '--args': handleArgsFlag,
+  '--json': handleJsonArgsFlag,
 };
 
 export function parseCallArguments(args: string[]): CallArgsParseResult {
@@ -99,7 +105,8 @@ function scanCallTokens(args: string[], result: CallArgsParseResult, state: Flag
       continue;
     }
     if (token.startsWith('--')) {
-      throw new CliUsageError(buildUnknownCallFlagMessage(token));
+      index = handleNamedArgumentFlag({ args, index, result, state });
+      continue;
     }
     positional.push(token);
     index += 1;
@@ -173,7 +180,7 @@ function resolveSelectorAndTool(
 
 function applyTrailingArguments(positional: string[], result: CallArgsParseResult, state: FlagParseState): void {
   const trailingPositional: unknown[] = [];
-  for (let index = 0; index < positional.length; ) {
+  for (let index = 0; index < positional.length;) {
     const token = positional[index];
     if (!token) {
       index += 1;
@@ -186,7 +193,7 @@ function applyTrailingArguments(positional: string[], result: CallArgsParseResul
       continue;
     }
     index += parsed.consumed;
-    const value = coerceValue(parsed.rawValue, state.coercionMode);
+    const { value, schemaValue } = resolveNamedArgumentValue(parsed.rawValue, state.coercionMode);
     if (parsed.key === 'tool' && !result.tool) {
       if (typeof value !== 'string') {
         throw new Error("Argument 'tool' must be a string value.");
@@ -200,6 +207,10 @@ function applyTrailingArguments(positional: string[], result: CallArgsParseResul
       }
       result.server = value as string;
       continue;
+    }
+    if (state.coercionMode === 'default' && typeof value === 'number') {
+      result.schemaStringCoercionCandidates ??= {};
+      result.schemaStringCoercionCandidates[parsed.key] = schemaValue;
     }
     result.args[parsed.key] = value;
   }
@@ -247,6 +258,11 @@ function handleTailLogFlag(context: FlagHandlerContext): number {
   return context.index + 1;
 }
 
+function handleDisableOAuthFlag(context: FlagHandlerContext): number {
+  context.result.disableOAuth = true;
+  return context.index + 1;
+}
+
 function handleSaveImagesFlag(context: FlagHandlerContext): number {
   context.result.saveImagesDir = consumeFlagValue(
     context.args,
@@ -274,18 +290,95 @@ function handleNoCoerceFlag(context: FlagHandlerContext): number {
 }
 
 function handleArgsFlag(context: FlagHandlerContext): number {
-  const raw = consumeFlagValue(context.args, context.index, '--args', '--args requires a JSON value.');
+  return consumeJsonArgsFlag(context, '--args', '--args requires a JSON value.');
+}
+
+function handleJsonArgsFlag(context: FlagHandlerContext): number {
+  return consumeJsonArgsFlag(context, '--json', '--json requires a JSON object value.');
+}
+
+function consumeJsonArgsFlag(context: FlagHandlerContext, flagName: string, missingValueMessage: string): number {
+  const rawFlagValue = consumeFlagValue(context.args, context.index, flagName, missingValueMessage);
+  const raw = rawFlagValue === '-' ? fs.readFileSync(0, 'utf8') : rawFlagValue;
   let decoded: unknown;
   try {
     decoded = JSON.parse(raw);
   } catch (error) {
-    throw new Error(`Unable to parse --args: ${(error as Error).message}`);
+    throw new Error(`Unable to parse ${flagName}: ${(error as Error).message}`, { cause: error });
   }
   if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) {
-    throw new Error('Unable to parse --args: --args must be a JSON object.');
+    throw new Error(`Unable to parse ${flagName}: ${flagName} must be a JSON object.`);
   }
   Object.assign(context.result.args, decoded);
   return context.index + 2;
+}
+
+function handleNamedArgumentFlag(context: FlagHandlerContext): number {
+  const token = context.args[context.index] ?? '';
+  const body = token.slice(2);
+  const eqIndex = body.indexOf('=');
+  const rawKey = eqIndex === -1 ? body : body.slice(0, eqIndex);
+  const key = normalizeLongFlagArgumentKey(rawKey);
+  if (!key) {
+    throw new CliUsageError(buildUnknownCallFlagMessage(token));
+  }
+
+  const rawValue =
+    eqIndex === -1
+      ? consumeFlagValue(context.args, context.index, token, `Flag '${token}' requires a value.`)
+      : body.slice(eqIndex + 1);
+  const { value, schemaValue } = resolveNamedArgumentValue(rawValue, context.state.coercionMode);
+  if (context.state.coercionMode === 'default' && typeof value === 'number') {
+    context.result.schemaStringCoercionCandidates ??= {};
+    context.result.schemaStringCoercionCandidates[key] = schemaValue;
+  } else if (context.state.coercionMode === 'default' && typeof value === 'string') {
+    context.result.schemaArrayCoercionCandidates ??= {};
+    context.result.schemaArrayCoercionCandidates[key] = schemaValue;
+  }
+  context.result.args[key] = value;
+  return context.index + (eqIndex === -1 ? 2 : 1);
+}
+
+function resolveNamedArgumentValue(
+  rawValue: string,
+  coercionMode: CoercionMode
+): { value: unknown; schemaValue: string } {
+  if (rawValue.startsWith('@@')) {
+    const literal = rawValue.slice(1);
+    return { value: literal, schemaValue: literal };
+  }
+  if (rawValue.length > 0 && rawValue.trim() === '') {
+    return { value: rawValue, schemaValue: rawValue };
+  }
+  if (!rawValue.startsWith('@')) {
+    return { value: coerceValue(rawValue, coercionMode), schemaValue: rawValue };
+  }
+
+  const filePath = rawValue.slice(1);
+  if (!filePath) {
+    throw new CliUsageError("Argument file reference '@' requires a path. Use '@@' for a literal leading '@'.");
+  }
+
+  let contents: Buffer;
+  try {
+    contents = fs.readFileSync(filePath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliUsageError(`Unable to read argument file '${filePath}': ${detail}`);
+  }
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(contents);
+    return { value: text, schemaValue: text };
+  } catch {
+    throw new CliUsageError(`Argument file '${filePath}' is not valid UTF-8 text.`);
+  }
+}
+
+function normalizeLongFlagArgumentKey(rawKey: string): string {
+  if (!rawKey || rawKey.startsWith('-')) {
+    return '';
+  }
+  return rawKey.replace(/-([a-zA-Z0-9])/g, (_match, char: string) => char.toUpperCase());
 }
 
 function consumeFlagValue(args: string[], index: number, token: string, missingValueMessage?: string): string {
